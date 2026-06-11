@@ -15,6 +15,7 @@ import {
   Globe2,
   Languages,
   LayoutDashboard,
+  Loader2,
   Menu,
   PanelRightClose,
   MessageSquare,
@@ -28,18 +29,27 @@ import {
   ShieldCheck,
   Trash2,
   User,
+  UserPlus,
+  Users,
   X,
 } from 'lucide-react';
 import { parse } from 'smol-toml';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { CitationGraph, parseCitationMermaid } from './components/citation-graph/index.tsx';
+import type { CitationEdge, CitationNode } from './components/citation-graph/index.tsx';
 
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000';
 const HISTORY_KEY = 'megatron_chat_history';
+
+import SkillEditorModal from './components/SkillEditorModal.tsx';
 const WORKSPACE_KEY = 'megatron_workspace_state_v1';
+const TASK_QUEUE_KEY = 'megatron_task_queue_v1';
 const DEFAULT_PROJECT_TITLE = 'Local Workspace';
 const DEFAULT_CONVERSATION_TITLE = 'New conversation';
 const linkValidationCache = new Map<string, { status: LinkValidationStatus; code?: number }>();
+const MEMBER_COLORS = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#dc2626', '#0891b2'];
+const seenAgentEventIds = new Set<string>();
 
 type Lang = 'zh' | 'en';
 type SkillKey = 'research' | 'code' | 'mediaVideo' | 'watch';
@@ -47,6 +57,16 @@ type SkillKey = 'research' | 'code' | 'mediaVideo' | 'watch';
 interface TaskItem {
   name: string;
   icon: string;
+}
+
+interface UserTask {
+  id: string;
+  title: string;
+  status: 'active' | 'completed';
+  conversationId: string;
+  messageId?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface ConfigText {
@@ -84,8 +104,16 @@ interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  userId?: string;
+  userName?: string;
   thoughts?: string[];
   isStreaming?: boolean;
+}
+
+interface ChatMember {
+  id: string;
+  name: string;
+  color: string;
 }
 
 interface ChatProject {
@@ -100,6 +128,10 @@ interface ChatConversation {
   id: string;
   projectId: string;
   title: string;
+  roomId: string;
+  isGroup: boolean;
+  members: ChatMember[];
+  activeUserId: string;
   messages: Message[];
   createdAt: number;
   updatedAt: number;
@@ -403,12 +435,60 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function createDefaultMember(index = 0): ChatMember {
+  return {
+    id: createId('user'),
+    name: index === 0 ? 'Owner' : `Member ${index + 1}`,
+    color: MEMBER_COLORS[index % MEMBER_COLORS.length],
+  };
+}
+
+function normalizeMembers(value: any): ChatMember[] {
+  const members = Array.isArray(value)
+    ? value
+        .filter((member) => member && typeof member === 'object')
+        .map((member, index) => ({
+          id: typeof member.id === 'string' && member.id.trim() ? member.id : createId('user'),
+          name: typeof member.name === 'string' && member.name.trim() ? member.name.trim() : index === 0 ? 'Owner' : `Member ${index + 1}`,
+          color: typeof member.color === 'string' && member.color.trim() ? member.color : MEMBER_COLORS[index % MEMBER_COLORS.length],
+        }))
+    : [];
+  return members.length ? members : [createDefaultMember(0), createDefaultMember(1)];
+}
+
+function normalizeConversation(conversation: any): ChatConversation {
+  const members = normalizeMembers(conversation?.members);
+  const activeUserId = typeof conversation?.activeUserId === 'string' && members.some((member) => member.id === conversation.activeUserId)
+    ? conversation.activeUserId
+    : members[0].id;
+  const id = typeof conversation?.id === 'string' && conversation.id ? conversation.id : createId('chat');
+  return {
+    id,
+    projectId: typeof conversation?.projectId === 'string' && conversation.projectId ? conversation.projectId : '',
+    title: typeof conversation?.title === 'string' && conversation.title ? conversation.title : DEFAULT_CONVERSATION_TITLE,
+    roomId: typeof conversation?.roomId === 'string' && conversation.roomId ? conversation.roomId : id,
+    isGroup: typeof conversation?.isGroup === 'boolean' ? conversation.isGroup : members.length > 1,
+    members,
+    activeUserId,
+    messages: Array.isArray(conversation?.messages) ? conversation.messages : [],
+    createdAt: Number(conversation?.createdAt) || Date.now(),
+    updatedAt: Number(conversation?.updatedAt) || Date.now(),
+  };
+}
+
 function createConversation(projectId: string, title = DEFAULT_CONVERSATION_TITLE, messages: Message[] = []): ChatConversation {
   const now = Date.now();
+  const firstMember = createDefaultMember(0);
+  const secondMember = createDefaultMember(1);
+  const id = createId('chat');
   return {
-    id: createId('chat'),
+    id,
     projectId,
     title,
+    roomId: id,
+    isGroup: true,
+    members: [firstMember, secondMember],
+    activeUserId: firstMember.id,
     messages,
     createdAt: now,
     updatedAt: now,
@@ -441,7 +521,13 @@ function createWorkspaceState(legacyMessages: Message[] = []): WorkspaceState {
 function normalizeWorkspaceState(value: any): WorkspaceState | null {
   if (!value || typeof value !== 'object') return null;
   const projects = value.projects && typeof value.projects === 'object' ? value.projects : {};
-  const conversations = value.conversations && typeof value.conversations === 'object' ? value.conversations : {};
+  const rawConversations = value.conversations && typeof value.conversations === 'object' ? value.conversations : {};
+  const conversations = Object.fromEntries(
+    Object.entries(rawConversations).map(([id, conversation]) => {
+      const normalized = normalizeConversation({ ...(conversation as any), id });
+      return [id, normalized];
+    }),
+  ) as Record<string, ChatConversation>;
   const activeProjectId = typeof value.activeProjectId === 'string' ? value.activeProjectId : '';
   const activeConversationId = typeof value.activeConversationId === 'string' ? value.activeConversationId : '';
   if (!projects[activeProjectId] || !conversations[activeConversationId]) return null;
@@ -463,14 +549,43 @@ function saveWorkspaceState(state: WorkspaceState) {
   localStorage.setItem(WORKSPACE_KEY, JSON.stringify(state));
 }
 
+function normalizeTaskQueue(value: any): UserTask[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((task) => task && typeof task === 'object' && typeof task.title === 'string' && task.title.trim())
+    .map((task) => ({
+      id: typeof task.id === 'string' && task.id ? task.id : createId('task'),
+      title: summarizeMessage(task.title, DEFAULT_CONVERSATION_TITLE),
+      status: task.status === 'completed' ? 'completed' : 'active',
+      conversationId: typeof task.conversationId === 'string' ? task.conversationId : '',
+      messageId: typeof task.messageId === 'string' ? task.messageId : undefined,
+      createdAt: Number(task.createdAt) || Date.now(),
+      updatedAt: Number(task.updatedAt) || Date.now(),
+    }));
+}
+
+function loadTaskQueue(): UserTask[] {
+  try {
+    const raw = localStorage.getItem(TASK_QUEUE_KEY);
+    return normalizeTaskQueue(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [];
+  }
+}
+
+function saveTaskQueue(tasks: UserTask[]) {
+  localStorage.setItem(TASK_QUEUE_KEY, JSON.stringify(tasks));
+}
+
 function deriveConversationTitle(messages: Message[]) {
   const firstUserMessage = messages.find((message) => message.role === 'user' && message.content.trim());
   if (!firstUserMessage) return DEFAULT_CONVERSATION_TITLE;
   return summarizeMessage(firstUserMessage.content, DEFAULT_CONVERSATION_TITLE);
 }
 
-function getConversationSessionId(conversationId: string) {
-  return `conversation_${toSafeAnchorPart(conversationId)}`;
+function getConversationSessionId(conversation: ChatConversation | string) {
+  const roomId = typeof conversation === 'string' ? conversation : conversation.roomId || conversation.id;
+  return `room_${toSafeAnchorPart(roomId)}`;
 }
 
 function mergeConfig(parsed: any): Config {
@@ -574,8 +689,8 @@ function buildConversationNavItems(messages: Message[], lang: Lang): Conversatio
       return [
         {
           anchorId: getMessageAnchorId(message.id),
-          label: lang === 'zh' ? `用户 ${userCount}` : `User ${userCount}`,
-          summary: summarizeMessage(message.content, lang === 'zh' ? '用户消息' : 'User message'),
+          label: message.userName || (lang === 'zh' ? `用户 ${userCount}` : `User ${userCount}`),
+          summary: summarizeMessage(message.content, message.userName || (lang === 'zh' ? '用户消息' : 'User message')),
           kind: 'user' as const,
         },
       ];
@@ -601,6 +716,45 @@ function buildConversationNavItems(messages: Message[], lang: Lang): Conversatio
   });
 }
 
+function initialProgressThoughts(lang: Lang) {
+  return lang === 'zh'
+    ? ['已收到请求，正在连接后端', '正在建立会话上下文']
+    : ['Request received, connecting to backend', 'Building session context'];
+}
+
+function appendMessageThought(message: Message, thought: string, recentWindow = 8): Message {
+  const cleanThought = thought.trim();
+  if (!cleanThought) return message;
+  const thoughts = message.thoughts || [];
+  if (thoughts.slice(-recentWindow).includes(cleanThought)) return message;
+  return { ...message, thoughts: [...thoughts, cleanThought] };
+}
+
+function formatAgentEventTrace(type: string, payload: any, lang: Lang) {
+  const data = payload?.data || {};
+  if (type === 'chat_start') {
+    return lang === 'zh' ? '后端已接收，正在分析任务' : 'Backend received the request and is analyzing it';
+  }
+  if (type === 'skill_route') {
+    const selected = Array.isArray(data.selected_skills) ? data.selected_skills : [];
+    const label = selected.length ? selected.slice(0, 3).join(', ') : (lang === 'zh' ? '通用对话' : 'general chat');
+    return lang === 'zh' ? `已选择技能路线：${label}` : `Selected skill route: ${label}`;
+  }
+  if (type === 'skill_start') {
+    return (lang === 'zh' ? '正在执行技能：' : 'Running skill: ') + (data.skill_name || data.name || '');
+  }
+  if (type === 'skill_end') {
+    return (lang === 'zh' ? '技能结束：' : 'Skill finished: ') + (data.skill_name || data.name || '') + ' (' + (data.status || 'completed') + ')';
+  }
+  if (type === 'tool_start') {
+    return (lang === 'zh' ? '正在执行：' : 'Running tool: ') + (data.name || '');
+  }
+  if (type === 'tool_end') {
+    return (lang === 'zh' ? '工具完成：' : 'Tool finished: ') + (data.name || '') + ' (' + (data.status || 'completed') + ')';
+  }
+  return '';
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>('zh');
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
@@ -610,17 +764,23 @@ export default function App() {
   const [runningConversationIds, setRunningConversationIds] = useState<string[]>([]);
   const [confirmReq, setConfirmReq] = useState<ConfirmReq | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceState>(loadWorkspaceState);
+  const [taskQueue, setTaskQueue] = useState<UserTask[]>(loadTaskQueue);
   const [activeAnchorId, setActiveAnchorId] = useState('');
   const [skillDraft, setSkillDraft] = useState<SkillDraft | null>(null);
   const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>(DEFAULT_MODEL_PROVIDERS);
   const [modelSelection, setModelSelection] = useState<ModelSelection>(() => loadSavedModelSelection() || defaultModelSelection(DEFAULT_MODEL_PROVIDERS, 'openai', 'gpt-4o-mini'));
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
+  const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [evolutionManagerOpen, setEvolutionManagerOpen] = useState(false);
   const [dataActionMessage, setDataActionMessage] = useState('');
 
   useEffect(() => {
     saveWorkspaceState(workspace);
   }, [workspace]);
+
+  useEffect(() => {
+    saveTaskQueue(taskQueue);
+  }, [taskQueue]);
 
   useEffect(() => {
     localStorage.setItem(MODEL_SELECTION_KEY, JSON.stringify(modelSelection));
@@ -656,20 +816,56 @@ export default function App() {
         ws.onmessage = (event) => {
           try {
             const payload = JSON.parse(event.data);
-            if (payload.type === 'scheduled_task') {
-              // Refresh current conversation: add a notification-like assistant message
-              const sessionId = payload.session_id;
+            const type = payload.type;
+            const sessionId = payload.session_id;
+            const eventId = typeof payload.event_id === 'string' ? payload.event_id : '';
+            if (eventId) {
+              if (seenAgentEventIds.has(eventId)) return;
+              seenAgentEventIds.add(eventId);
+              if (seenAgentEventIds.size > 500) {
+                const oldest = seenAgentEventIds.values().next().value;
+                if (oldest) seenAgentEventIds.delete(oldest);
+              }
+            }
+
+            if (type === 'chat_start' || type === 'skill_route' || type === 'skill_start' || type === 'skill_end' || type === 'tool_start' || type === 'tool_end') {
+              setWorkspace((prev) => {
+                const convId = prev.activeConversationId;
+                const conv = prev.conversations[convId];
+                if (!conv) return prev;
+                if (sessionId && getConversationSessionId(conv) !== sessionId) return prev;
+                const lastMsg = conv.messages[conv.messages.length - 1];
+                if (!lastMsg || lastMsg.role !== 'assistant') return prev;
+                const traceLine = formatAgentEventTrace(type, payload, lang);
+                if (!traceLine) return prev;
+                const updatedLastMsg = appendMessageThought(lastMsg, traceLine);
+                if (updatedLastMsg === lastMsg) return prev;
+                const now = Date.now();
+                return {
+                  ...prev,
+                  conversations: {
+                    ...prev.conversations,
+                    [convId]: { ...conv, messages: conv.messages.map((m, idx) =>
+                      idx === conv.messages.length - 1 ? updatedLastMsg : m
+                    ), updatedAt: now },
+                  },
+                };
+              });
+              return;
+            }
+
+            if (type === 'scheduled_task') {
               const prompt = payload.prompt || '';
               if (sessionId && prompt) {
-                // If this is the active conversation, show an in-chat notification
                 setWorkspace((prev) => {
                   const convId = prev.activeConversationId;
                   const conv = prev.conversations[convId];
-                  if (!conv || getConversationSessionId(convId) !== sessionId) return prev;
-                  const msg: Message = {
+                  if (!conv || getConversationSessionId(conv) !== sessionId) return prev;
+                  const msg = {
                     id: 'scheduled-' + Date.now(),
-                    role: 'assistant',
-                    content: '⏰ ' + prompt,
+                    role: 'assistant' as const,
+                    content: '\u23f0 ' + prompt.slice(0, 200),
+                    thoughts: [],
                     isStreaming: false,
                   };
                   const now = Date.now();
@@ -684,7 +880,6 @@ export default function App() {
               }
             }
           } catch {
-            // Ignore malformed payloads.
           }
         };
         ws.onclose = () => {
@@ -741,8 +936,12 @@ export default function App() {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [activeProject, workspace.conversations]);
   const messages = activeConversation?.messages || [];
-  const activeSessionId = getConversationSessionId(activeConversation?.id || workspace.activeConversationId);
+  const activeMembers = activeConversation?.members || [];
+  const activeMember = activeMembers.find((member) => member.id === activeConversation?.activeUserId) || activeMembers[0] || { id: 'local-user', name: 'Owner', color: MEMBER_COLORS[0] };
+  const activeSessionId = getConversationSessionId(activeConversation || workspace.activeConversationId);
   const activeChatLoading = runningConversationIds.includes(workspace.activeConversationId);
+  const activeTasks = useMemo(() => taskQueue.filter((task) => task.status === 'active').sort((a, b) => b.updatedAt - a.updatedAt), [taskQueue]);
+  const completedTasks = useMemo(() => taskQueue.filter((task) => task.status === 'completed').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20), [taskQueue]);
   const conversationNavItems = useMemo(() => buildConversationNavItems(messages, lang), [messages, lang]);
 
   const updateConversationMessages = useCallback((conversationId: string, updater: React.SetStateAction<Message[]>) => {
@@ -772,6 +971,67 @@ export default function App() {
     (updater: React.SetStateAction<Message[]>) => updateConversationMessages(workspace.activeConversationId, updater),
     [updateConversationMessages, workspace.activeConversationId],
   );
+
+  const handleSelectActiveMember = useCallback((memberId: string) => {
+    setWorkspace((prev) => {
+      const conversation = prev.conversations[prev.activeConversationId];
+      if (!conversation || !conversation.members.some((member) => member.id === memberId)) return prev;
+      return {
+        ...prev,
+        conversations: {
+          ...prev.conversations,
+          [conversation.id]: { ...conversation, activeUserId: memberId },
+        },
+      };
+    });
+  }, [lang]);
+
+  const handleAddActiveMember = useCallback(() => {
+    const fallbackName = activeConversation ? `Member ${activeConversation.members.length + 1}` : 'Member';
+    const promptedName = window.prompt(lang === 'zh' ? '输入成员名称' : 'Member name', fallbackName);
+    if (promptedName === null) return;
+    const memberName = (promptedName || fallbackName).trim() || fallbackName;
+    setWorkspace((prev) => {
+      const conversation = prev.conversations[prev.activeConversationId];
+      if (!conversation) return prev;
+      const member = {
+        id: createId('user'),
+        name: memberName,
+        color: MEMBER_COLORS[conversation.members.length % MEMBER_COLORS.length],
+      };
+      return {
+        ...prev,
+        conversations: {
+          ...prev.conversations,
+          [conversation.id]: {
+            ...conversation,
+            isGroup: true,
+            members: [...conversation.members, member],
+            activeUserId: member.id,
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
+  }, [activeConversation, lang]);
+
+  const handleDeleteTask = useCallback((taskId: string) => {
+    setTaskQueue((prev) => prev.filter((task) => task.id !== taskId));
+  }, []);
+
+  const handleSelectTask = useCallback((task: UserTask) => {
+    if (task.conversationId && workspace.conversations[task.conversationId]) {
+      setWorkspace((prev) => {
+        const conversation = prev.conversations[task.conversationId];
+        if (!conversation) return prev;
+        return { ...prev, activeProjectId: conversation.projectId, activeConversationId: conversation.id };
+      });
+      if (task.messageId) {
+        window.setTimeout(() => scrollToAnchor(getMessageAnchorId(task.messageId || ''), true), 80);
+      }
+      if (window.innerWidth < 800) setLeftSidebarOpen(false);
+    }
+  }, [workspace.conversations]);
 
   useEffect(() => {
     if (!activeChatLoading || confirmReq) return;
@@ -914,6 +1174,7 @@ export default function App() {
           activeConversationId: nextActiveConversationId,
         };
       });
+      setTaskQueue((prev) => prev.filter((task) => task.conversationId !== conversationId));
       clearHashAnchor();
     },
     [runningConversationIds],
@@ -957,9 +1218,15 @@ export default function App() {
           activeConversationId: nextActiveConversationId,
         };
       });
+      setTaskQueue((prev) => {
+        const project = workspace.projects[projectId];
+        if (!project) return prev;
+        const conversationIds = new Set(project.conversationIds);
+        return prev.filter((task) => !conversationIds.has(task.conversationId));
+      });
       clearHashAnchor();
     },
-    [runningConversationIds],
+    [runningConversationIds, workspace.projects],
   );
 
   const handleClearActiveHistory = useCallback(() => {
@@ -986,7 +1253,9 @@ export default function App() {
     clearHashAnchor();
     const emptyWorkspace = createWorkspaceState();
     setWorkspace(emptyWorkspace);
+    setTaskQueue([]);
     localStorage.removeItem(HISTORY_KEY);
+    localStorage.removeItem(TASK_QUEUE_KEY);
     localStorage.setItem(WORKSPACE_KEY, JSON.stringify(emptyWorkspace));
     setDataActionMessage(lang === 'zh' ? '正在清理数据...' : 'Clearing data...');
 
@@ -1051,21 +1320,46 @@ export default function App() {
     clearHashAnchor();
 
     const targetConversationId = workspace.activeConversationId;
-    const targetSessionId = getConversationSessionId(targetConversationId);
+    const targetConversation = workspace.conversations[targetConversationId];
+    if (!targetConversation) return;
+    const sender = targetConversation.members.find((member) => member.id === targetConversation.activeUserId) || targetConversation.members[0] || activeMember;
+    const targetSessionId = getConversationSessionId(targetConversation);
     const userMsgId = `${Date.now()}-user`;
     const botMsgId = `${Date.now()}-assistant`;
+    const taskId = createId('task');
+    const now = Date.now();
     updateConversationMessages(targetConversationId, (prev) => [
       ...prev,
-      { id: userMsgId, role: 'user', content: cleanText },
-      { id: botMsgId, role: 'assistant', content: '', thoughts: [], isStreaming: true },
+      { id: userMsgId, role: 'user', content: cleanText, userId: sender.id, userName: sender.name },
+      { id: botMsgId, role: 'assistant', content: '', thoughts: initialProgressThoughts(lang), isStreaming: true },
     ]);
+    const nextTask: UserTask = {
+      id: taskId,
+      title: summarizeMessage(cleanText, lang === 'zh' ? '新任务' : 'New task'),
+      status: 'active',
+      conversationId: targetConversationId,
+      messageId: userMsgId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setTaskQueue((prev) => [nextTask, ...prev].slice(0, 80));
     setRunningConversationIds((prev) => (prev.includes(targetConversationId) ? prev : [...prev, targetConversationId]));
 
     try {
       const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: targetSessionId, message: cleanText, domain: 'auto', provider: modelSelection.provider, model: modelSelection.model, lang }),
+        body: JSON.stringify({
+          session_id: targetSessionId,
+          room_id: targetConversation.roomId,
+          user_id: sender.id,
+          user_name: sender.name,
+          message: cleanText,
+          domain: 'auto',
+          provider: modelSelection.provider,
+          model: modelSelection.model,
+          lang,
+        }),
       });
 
       const contentType = res.headers.get('content-type') || '';
@@ -1075,10 +1369,10 @@ export default function App() {
         const data = await res.json();
         const stagedThoughts =
           lang === 'zh'
-            ? ['解析目标与上下文', '选择合适的技能分类', '整理执行结果']
-            : ['Parsing objective and context', 'Selecting the matching skill category', 'Preparing the final response'];
+            ? ['后端已返回结果，正在整理回复']
+            : ['Backend returned a result, preparing the response'];
         for (const thought of stagedThoughts) {
-          updateConversationMessages(targetConversationId, (prev) => prev.map((m) => (m.id === botMsgId ? { ...m, thoughts: [...(m.thoughts || []), thought] } : m)));
+          updateConversationMessages(targetConversationId, (prev) => prev.map((m) => (m.id === botMsgId ? appendMessageThought(m, thought) : m)));
           await delay(220);
         }
         await typeAnswer(data.answer || (lang === 'zh' ? '后端返回为空。' : 'The backend returned an empty answer.'), botMsgId, (updater) =>
@@ -1097,6 +1391,9 @@ export default function App() {
         ),
       );
     } finally {
+      setTaskQueue((prev) =>
+        prev.map((task) => (task.id === taskId ? { ...task, status: 'completed', updatedAt: Date.now() } : task)),
+      );
       updateConversationMessages(targetConversationId, (prev) => prev.map((m) => (m.id === botMsgId ? { ...m, isStreaming: false } : m)));
       setRunningConversationIds((prev) => prev.filter((id) => id !== targetConversationId));
     }
@@ -1134,15 +1431,20 @@ export default function App() {
           activeProjectId={workspace.activeProjectId}
           activeConversationId={workspace.activeConversationId}
           runningConversationIds={runningConversationIds}
+          activeTasks={activeTasks}
+          completedTasks={completedTasks}
           onSelectProject={handleSelectProject}
           onCreateProject={handleCreateProject}
           onDeleteProject={handleDeleteProject}
           onSelectConversation={handleSelectConversation}
           onCreateConversation={handleCreateConversation}
           onDeleteConversation={handleDeleteConversation}
+          onSelectTask={handleSelectTask}
+          onDeleteTask={handleDeleteTask}
           onTestSkill={handleTestSkill}
           onOpenEvolutionManager={() => setEvolutionManagerOpen(true)}
           onOpenMemoryManager={() => setMemoryManagerOpen(true)}
+          onOpenSkillEditor={() => setSkillEditorOpen(true)}
           onClearAllData={handleClearAllData}
           clearAllDisabled={runningConversationIds.length > 0}
           dataActionMessage={dataActionMessage}
@@ -1156,11 +1458,15 @@ export default function App() {
         messages={messages}
         activeProjectTitle={displayWorkspaceTitle(activeProject?.title || DEFAULT_PROJECT_TITLE, lang)}
         activeConversationTitle={displayWorkspaceTitle(activeConversation?.title || DEFAULT_CONVERSATION_TITLE, lang)}
+        members={activeMembers}
+        activeMemberId={activeMember.id}
         isChatLoading={activeChatLoading}
         skillDraft={skillDraft}
         modelProviders={modelProviders}
         modelSelection={modelSelection}
         onSelectModel={setModelSelection}
+        onSelectMember={handleSelectActiveMember}
+        onAddMember={handleAddActiveMember}
         onPrompt={handleSendMessage}
         onSendMessage={handleSendMessage}
         onClearHistory={handleClearActiveHistory}
@@ -1182,6 +1488,7 @@ export default function App() {
       </aside>
 
       {confirmReq && <ConfirmModal lang={lang} req={confirmReq} onAction={handleConfirmAction} />}
+      {skillEditorOpen && <SkillEditorModal lang={lang} onClose={() => setSkillEditorOpen(false)} />}
       {evolutionManagerOpen && <EvolutionManagerModal lang={lang} onClose={() => setEvolutionManagerOpen(false)} />}
       {memoryManagerOpen && <MemoryManagerModal lang={lang} onClose={() => setMemoryManagerOpen(false)} />}
     </div>
@@ -1249,15 +1556,20 @@ function Sidebar({
   activeProjectId,
   activeConversationId,
   runningConversationIds,
+  activeTasks,
+  completedTasks,
   onSelectProject,
   onCreateProject,
   onDeleteProject,
   onSelectConversation,
   onCreateConversation,
   onDeleteConversation,
+  onSelectTask,
+  onDeleteTask,
   onTestSkill,
   onOpenEvolutionManager,
   onOpenMemoryManager,
+  onOpenSkillEditor,
   onClearAllData,
   clearAllDisabled,
   dataActionMessage,
@@ -1270,22 +1582,25 @@ function Sidebar({
   activeProjectId: string;
   activeConversationId: string;
   runningConversationIds: string[];
+  activeTasks: UserTask[];
+  completedTasks: UserTask[];
   onSelectProject: (projectId: string) => void;
   onCreateProject: () => void;
   onDeleteProject: (projectId: string) => void;
   onSelectConversation: (conversationId: string) => void;
   onCreateConversation: () => void;
   onDeleteConversation: (conversationId: string) => void;
+  onSelectTask: (task: UserTask) => void;
+  onDeleteTask: (taskId: string) => void;
   onTestSkill: (skill: SkillKey) => void;
   onOpenEvolutionManager: () => void;
   onOpenMemoryManager: () => void;
+  onOpenSkillEditor: () => void;
   onClearAllData: () => void;
   clearAllDisabled: boolean;
   dataActionMessage: string;
   onClose: () => void;
 }) {
-  const activeTasks = t.activeTasksList || [];
-  const completedTasks = t.completedTasksList || [];
   return (
     <div className="flex h-full w-[280px] flex-col bg-[var(--bg-rail)] text-white shadow-2xl">
       <div className="flex h-16 items-center justify-between border-b border-white/10 px-4">
@@ -1360,12 +1675,20 @@ function Sidebar({
 
         <SectionLabel>{t.activeTasks}</SectionLabel>
         <div className="space-y-1.5">
-          {activeTasks.map((task, idx) => <NavItem key={`${task.name}-${idx}`} active icon={getIconComponent(task.icon)} text={task.name} />)}
+          {activeTasks.length ? (
+            activeTasks.map((task) => <TaskQueueItem key={task.id} task={task} active lang={lang} onSelect={onSelectTask} onDelete={onDeleteTask} />)
+          ) : (
+            <EmptyTaskQueueText>{lang === 'zh' ? '暂无正在推进的任务' : 'No active tasks'}</EmptyTaskQueueText>
+          )}
         </div>
         <div className="mt-6">
           <SectionLabel>{t.completedTasks}</SectionLabel>
           <div className="space-y-1.5">
-            {completedTasks.map((task, idx) => <NavItem key={`${task.name}-${idx}`} icon={getIconComponent(task.icon)} text={task.name} />)}
+            {completedTasks.length ? (
+              completedTasks.map((task) => <TaskQueueItem key={task.id} task={task} lang={lang} onSelect={onSelectTask} onDelete={onDeleteTask} />)
+            ) : (
+              <EmptyTaskQueueText>{lang === 'zh' ? '暂无已完成任务' : 'No completed tasks'}</EmptyTaskQueueText>
+            )}
           </div>
         </div>
         <div className="mt-6 rounded-lg border border-white/10 bg-white/[0.04] p-3">
@@ -1403,6 +1726,14 @@ function Sidebar({
             >
               <Database className="h-3.5 w-3.5" />
               <span className="min-w-0 truncate">{lang === 'zh' ? '管理长期记忆' : 'Manage memory'}</span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-lg border border-white/10 bg-black/10 px-3 py-2 text-left text-xs text-white/75 transition hover:border-[var(--mint)] hover:bg-white/10 hover:text-white"
+              onClick={onOpenSkillEditor}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              <span className="min-w-0 truncate">{lang === 'zh' ? '编辑技能' : 'Edit skills'}</span>
             </button>
             <button
               type="button"
@@ -1490,6 +1821,62 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div className="mb-2 px-2 text-xs font-semibold text-white/45">{children}</div>;
 }
 
+function TaskQueueItem({
+  task,
+  active,
+  lang,
+  onSelect,
+  onDelete,
+}: {
+  task: UserTask;
+  active?: boolean;
+  lang: Lang;
+  onSelect: (task: UserTask) => void;
+  onDelete: (taskId: string) => void;
+}) {
+  return (
+    <div className={`group flex items-center gap-1 rounded-lg border pr-1 transition ${active ? 'border-white/14 bg-white/10 text-white' : 'border-transparent text-white/62 hover:bg-white/[0.06] hover:text-white'}`}>
+      <button type="button" className="flex min-w-0 flex-1 items-start gap-2 px-3 py-2.5 text-left" onClick={() => onSelect(task)} title={task.title}>
+        <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md ${active ? 'bg-[var(--mint)]/15 text-[var(--mint)]' : 'bg-white/8 text-white/45'}`}>
+          {active ? <Activity className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="line-clamp-2 text-xs leading-5">{task.title}</span>
+          <span className="mt-0.5 block truncate text-[10px] text-white/35">
+            {active ? (lang === 'zh' ? '进行中' : 'In progress') : lang === 'zh' ? '已完成' : 'Completed'} · {formatRelativeTaskTime(task.updatedAt, lang)}
+          </span>
+        </span>
+      </button>
+      <button
+        type="button"
+        className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-white/35 opacity-0 transition hover:bg-white/10 hover:text-[var(--danger)] group-hover:opacity-100"
+        title={lang === 'zh' ? '删除任务' : 'Delete task'}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDelete(task.id);
+        }}
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function EmptyTaskQueueText({ children }: { children: React.ReactNode }) {
+  return <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/35">{children}</div>;
+}
+
+function formatRelativeTaskTime(timestamp: number, lang: Lang) {
+  const diff = Math.max(0, Date.now() - timestamp);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return lang === 'zh' ? '刚刚' : 'just now';
+  if (minutes < 60) return lang === 'zh' ? `${minutes} 分钟前` : `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return lang === 'zh' ? `${hours} 小时前` : `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return lang === 'zh' ? `${days} 天前` : `${days}d ago`;
+}
+
 function NavItem({ active, icon, text }: { active?: boolean; icon: React.ReactNode; text: string }) {
   return (
     <div className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 text-sm ${active ? 'border-white/14 bg-white/10 text-white' : 'border-transparent text-white/60 hover:bg-white/[0.06] hover:text-white'}`}>
@@ -1519,11 +1906,15 @@ function MainChat({
   messages,
   activeProjectTitle,
   activeConversationTitle,
+  members,
+  activeMemberId,
   isChatLoading,
   skillDraft,
   modelProviders,
   modelSelection,
   onSelectModel,
+  onSelectMember,
+  onAddMember,
   onPrompt,
   onSendMessage,
   onClearHistory,
@@ -1536,11 +1927,15 @@ function MainChat({
   messages: Message[];
   activeProjectTitle: string;
   activeConversationTitle: string;
+  members: ChatMember[];
+  activeMemberId: string;
   isChatLoading: boolean;
   skillDraft: SkillDraft | null;
   modelProviders: ModelProviderOption[];
   modelSelection: ModelSelection;
   onSelectModel: (selection: ModelSelection) => void;
+  onSelectMember: (memberId: string) => void;
+  onAddMember: () => void;
   onPrompt: (value: string) => void;
   onSendMessage: (value: string) => void;
   onClearHistory: () => void;
@@ -1593,6 +1988,7 @@ function MainChat({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+          <MemberPicker lang={lang} members={members} activeMemberId={activeMemberId} onSelect={onSelectMember} onAdd={onAddMember} />
           <ModelPicker lang={lang} providers={modelProviders} selection={modelSelection} onSelect={onSelectModel} />
           <IconButton testId="clear-history" title={lang === 'zh' ? '清空历史' : 'Clear history'} onClick={onClearHistory}>
             <Trash2 className="h-4 w-4" />
@@ -1613,7 +2009,7 @@ function MainChat({
           ) : (
             messages.map((msg) =>
               msg.role === 'user' ? (
-                <UserMessage key={msg.id} anchorId={getMessageAnchorId(msg.id)} content={msg.content} />
+                <UserMessage key={msg.id} anchorId={getMessageAnchorId(msg.id)} content={msg.content} userName={msg.userName} />
               ) : (
                 <AgentMessage key={msg.id} lang={lang} anchorId={getMessageAnchorId(msg.id)} traceAnchorId={getTraceAnchorId(msg.id)} thoughts={msg.thoughts} isStreaming={msg.isStreaming}>
                   {msg.content}
@@ -1651,6 +2047,91 @@ function MainChat({
         </div>
       </div>
     </main>
+  );
+}
+
+function MemberPicker({
+  lang,
+  members,
+  activeMemberId,
+  onSelect,
+  onAdd,
+}: {
+  lang: Lang;
+  members: ChatMember[];
+  activeMemberId: string;
+  onSelect: (memberId: string) => void;
+  onAdd: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const activeMember = members.find((member) => member.id === activeMemberId) || members[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointer = (event: MouseEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointer);
+    return () => document.removeEventListener('mousedown', handlePointer);
+  }, [open]);
+
+  return (
+    <div ref={pickerRef} className="relative">
+      <button
+        type="button"
+        className="flex h-9 max-w-[150px] items-center gap-2 rounded-lg border border-[var(--border)] bg-white px-2.5 text-left text-xs text-[var(--text-main)] transition hover:border-[var(--border-strong)]"
+        title={lang === 'zh' ? '当前发言人' : 'Current speaker'}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md text-white" style={{ backgroundColor: activeMember?.color || MEMBER_COLORS[0] }}>
+          <Users className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 truncate font-semibold">{activeMember?.name || (lang === 'zh' ? '成员' : 'Member')}</span>
+        <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--text-muted)] transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-11 z-50 w-[240px] rounded-lg border border-[var(--border)] bg-white p-2 shadow-2xl">
+          <div className="mb-2 flex items-center justify-between px-1 text-xs font-semibold text-[var(--text-muted)]">
+            <span>{lang === 'zh' ? '群聊成员' : 'Group members'}</span>
+            <span>{members.length}</span>
+          </div>
+          <div className="space-y-1">
+            {members.map((member) => {
+              const selected = member.id === activeMemberId;
+              return (
+                <button
+                  key={member.id}
+                  type="button"
+                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-sm transition ${selected ? 'bg-[var(--bg-soft)] text-[var(--accent)]' : 'hover:bg-[var(--bg-soft)]'}`}
+                  onClick={() => {
+                    onSelect(member.id);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: member.color }} />
+                    <span className="truncate">{member.name}</span>
+                  </span>
+                  {selected ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : null}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--bg-soft)]"
+            onClick={() => {
+              onAdd();
+              setOpen(false);
+            }}
+          >
+            <UserPlus className="h-4 w-4" />
+            {lang === 'zh' ? '添加成员' : 'Add member'}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1790,12 +2271,15 @@ function EmptyChat({ lang, onPrompt }: { lang: Lang; onPrompt: (value: string) =
   );
 }
 
-function UserMessage({ anchorId, content }: { anchorId: string; content: string }) {
+function UserMessage({ anchorId, content, userName }: { anchorId: string; content: string; userName?: string }) {
   return (
     <div id={anchorId} data-chat-anchor className="chat-anchor flex justify-end">
       <div className="flex max-w-[88%] items-start gap-3">
-        <div className="rounded-lg bg-[var(--accent)] px-4 py-3 text-sm leading-6 text-white shadow-sm">
-          <TextBlock content={content} inverted />
+        <div className="min-w-0">
+          {userName ? <div className="mb-1 text-right text-xs font-semibold text-[var(--text-muted)]">{userName}</div> : null}
+          <div className="rounded-lg bg-[var(--accent)] px-4 py-3 text-sm leading-6 text-white shadow-sm">
+            <TextBlock content={content} inverted />
+          </div>
         </div>
         <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--bg-soft)] text-[var(--text-muted)]">
           <User className="h-4 w-4" />
@@ -1820,6 +2304,9 @@ function AgentMessage({
   thoughts?: string[];
   isStreaming?: boolean;
 }) {
+  const hasContent = children.trim().length > 0;
+  const currentThought = thoughts?.[thoughts.length - 1] || '';
+
   return (
     <div id={anchorId} data-chat-anchor className="chat-anchor flex items-start gap-3">
       <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--bg-rail)] text-white">
@@ -1848,9 +2335,28 @@ function AgentMessage({
           </div>
         )}
         <div className="rounded-lg border border-[var(--border)] bg-white px-4 py-3 text-sm leading-6 text-[var(--text-main)] shadow-sm">
-          <TextBlock content={children} />
-          {isStreaming && <span className="ml-1 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-[var(--accent)]" />}
+          {hasContent ? <TextBlock content={children} /> : isStreaming ? <RunningProgress lang={lang} currentThought={currentThought} /> : <TextBlock content={children} />}
+          {isStreaming && hasContent && <span className="ml-1 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-[var(--accent)]" />}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function RunningProgress({ lang, currentThought }: { lang: Lang; currentThought: string }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 text-[var(--accent)]">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span className="font-semibold">{lang === 'zh' ? '智能体正在处理' : 'Agent is working'}</span>
+      </div>
+      <div className="rounded-lg bg-[var(--bg-soft)] px-3 py-2 text-xs leading-5 text-[var(--text-muted)]">
+        {currentThought || (lang === 'zh' ? '正在等待后端进度...' : 'Waiting for backend progress...')}
+      </div>
+      <div className="space-y-2" aria-hidden="true">
+        <div className="h-2 w-11/12 animate-pulse rounded-full bg-[var(--bg-soft)]" />
+        <div className="h-2 w-8/12 animate-pulse rounded-full bg-[var(--bg-soft)]" />
+        <div className="h-2 w-10/12 animate-pulse rounded-full bg-[var(--bg-soft)]" />
       </div>
     </div>
   );
@@ -1909,6 +2415,21 @@ function splitRichTextBlocks(content: string): RichTextBlock[] {
 }
 
 function CodeBlock({ language, content }: { language?: string; content: string }) {
+  const normalizedLanguage = (language || '').trim().toLowerCase();
+  if (normalizedLanguage === 'mermaid') {
+    const graph = parseCitationMermaid(content);
+    if (graph.nodes.length || graph.edges.length) {
+      return <CitationGraphPanel nodes={graph.nodes} edges={graph.edges} />;
+    }
+  }
+
+  if (normalizedLanguage === 'json' || normalizedLanguage === 'javascript' || normalizedLanguage === 'js') {
+    const graph = extractCitationGraphData(content);
+    if (graph && (graph.nodes.length || graph.edges.length)) {
+      return <CitationGraphPanel nodes={graph.nodes} edges={graph.edges} />;
+    }
+  }
+
   return (
     <div className="my-3 max-w-full overflow-hidden rounded-lg border border-slate-700 bg-[#111827] text-left">
       <SyntaxHighlighter
@@ -1921,6 +2442,130 @@ function CodeBlock({ language, content }: { language?: string; content: string }
       </SyntaxHighlighter>
     </div>
   );
+}
+
+function CitationGraphPanel({ nodes, edges }: { nodes: CitationNode[]; edges: CitationEdge[] }) {
+  const [view, setView] = useState<'graph' | 'list'>('graph');
+  const citedByCount = useMemo(() => {
+    const counts = new Map<string, number>();
+    edges.forEach((edge) => counts.set(edge.target, (counts.get(edge.target) || 0) + 1));
+    return counts;
+  }, [edges]);
+
+  return (
+    <div className="my-3 overflow-hidden rounded-lg border border-[var(--border)] bg-white">
+      <div className="flex flex-col gap-3 border-b border-[var(--border)] bg-[var(--bg-soft)] px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-[var(--text-main)]">论文图谱</div>
+          <div className="mt-0.5 text-xs text-[var(--text-muted)]">{nodes.length} 篇文献 · {edges.length} 条引用关系</div>
+        </div>
+        <div className="grid grid-cols-2 rounded-lg border border-[var(--border)] bg-white p-1 text-xs">
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 transition ${view === 'graph' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--text-main)]'}`}
+            onClick={() => setView('graph')}
+          >
+            引用关系
+          </button>
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 transition ${view === 'list' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--text-main)]'}`}
+            onClick={() => setView('list')}
+          >
+            文献列表
+          </button>
+        </div>
+      </div>
+      {view === 'graph' ? (
+        <CitationGraph nodes={nodes} edges={edges} />
+      ) : (
+        <PaperReferenceList nodes={nodes} citedByCount={citedByCount} />
+      )}
+    </div>
+  );
+}
+
+function PaperReferenceList({ nodes, citedByCount }: { nodes: CitationNode[]; citedByCount: Map<string, number> }) {
+  const sortedNodes = [...nodes].sort((a, b) => {
+    const aYear = Number(a.year || 0);
+    const bYear = Number(b.year || 0);
+    return bYear - aYear || Number(b.citations || 0) - Number(a.citations || 0);
+  });
+
+  if (!sortedNodes.length) {
+    return <div className="p-4 text-sm text-[var(--text-muted)]">暂无文献节点。</div>;
+  }
+
+  return (
+    <div className="max-h-[460px] overflow-y-auto p-3">
+      <div className="space-y-2">
+        {sortedNodes.map((node, index) => (
+          <div key={`${node.id}-${index}`} className="rounded-lg border border-[var(--border)] bg-white p-3 shadow-sm">
+            <div className="flex items-start gap-3">
+              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--bg-soft)] text-xs font-semibold text-[var(--accent)]">
+                {index + 1}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="break-words text-sm font-semibold leading-5 text-[var(--text-main)]">{node.title || node.id}</div>
+                <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--text-muted)]">
+                  {node.year ? <span>{node.year}</span> : null}
+                  {node.venue ? <span>{node.venue}</span> : null}
+                  {typeof node.citations === 'number' && node.citations > 0 ? <span>{node.citations} citations</span> : null}
+                  {citedByCount.get(node.id) ? <span>图中被引用 {citedByCount.get(node.id)} 次</span> : null}
+                  {node.external ? <span className="rounded-md bg-[var(--bg-soft)] px-1.5 py-0.5">扩展引用</span> : null}
+                </div>
+                <div className="mt-1 font-mono text-[10px] text-[var(--text-muted)]">{node.id}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function extractCitationGraphData(content: string): { nodes: CitationNode[]; edges: CitationEdge[] } | null {
+  try {
+    const parsed = JSON.parse(content);
+    const graph = findCitationGraphPayload(parsed);
+    if (!graph) return null;
+    const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    const edges = Array.isArray(graph.edges) ? graph.edges : [];
+    if (!nodes.length && !edges.length) return null;
+    return {
+      nodes: nodes.map((node: any, index: number) => ({
+        id: String(node.id || node.title || `paper-${index}`),
+        title: String(node.title || node.label || node.id || `Paper ${index + 1}`),
+        year: node.year || node.publication_year,
+        venue: node.venue || node.source || '',
+        citations: Number(node.citations || node.cited_by_count || 0),
+        external: Boolean(node.external),
+      })),
+      edges: edges.map((edge: any) => ({
+        source: String(edge.source || edge.from || ''),
+        target: String(edge.target || edge.to || ''),
+        type: edge.type || edge.label || 'cites',
+      })).filter((edge: CitationEdge) => edge.source && edge.target),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function findCitationGraphPayload(value: any): any | null {
+  if (!value || typeof value !== 'object') return null;
+  if (Array.isArray(value.nodes) && Array.isArray(value.edges)) return value;
+  if (value.citation_graph) return findCitationGraphPayload(value.citation_graph);
+  if (value.graph) return findCitationGraphPayload(value.graph);
+  if (value.result) return findCitationGraphPayload(value.result);
+  if (typeof value.output === 'string') {
+    try {
+      return findCitationGraphPayload(JSON.parse(value.output));
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 function renderMarkdownText(text: string, keyPrefix: string, inverted: boolean): React.ReactNode[] {
@@ -2097,17 +2742,20 @@ function renderInlineWithBreaks(text: string, keyPrefix: string, inverted: boole
 
 function renderInlineContent(text: string, keyPrefix: string, inverted: boolean): React.ReactNode[] {
   const parts = text.split(/(`[^`\n]*`)/g);
-  return parts.flatMap((part, idx) => {
-    if (!part) return [];
+  const nodes: React.ReactNode[] = [];
+  parts.forEach((part, idx) => {
+    if (!part) return;
     if (/^`[^`\n]*`$/.test(part)) {
-      return [
+      nodes.push(
         <code key={`${keyPrefix}-code-${idx}`} className="rounded bg-black/10 px-1 py-0.5 font-mono text-[0.92em]">
           {part.slice(1, -1)}
         </code>,
-      ];
+      );
+      return;
     }
-    return renderLinkedText(part, `${keyPrefix}-text-${idx}`, inverted);
+    nodes.push(...renderLinkedText(part, `${keyPrefix}-text-${idx}`, inverted));
   });
+  return nodes;
 }
 
 function renderLinkedText(text: string, keyPrefix: string, inverted: boolean): React.ReactNode[] {

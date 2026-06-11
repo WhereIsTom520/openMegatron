@@ -4,6 +4,27 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
+if /i "%~1"=="--help" goto TOP_HELP
+if /i "%~1"=="-h" goto TOP_HELP
+if "%~1"=="/?" goto TOP_HELP
+goto TOP_HELP_DONE
+
+:TOP_HELP
+echo Megatron launcher usage:
+echo.
+echo   start.bat              Open the interactive menu
+echo   start.bat --help       Show this help
+echo.
+echo Menu options:
+echo   1  Start all services: backend API + frontend
+echo   2  Start Python backend only: CLI mode
+echo   3  Open cleanup manager
+echo   4  Install base environment: Python, Docker, Node.js
+echo   0  Exit
+exit /b 0
+
+:TOP_HELP_DONE
+
 set "TQDM_DISABLE=1"
 set "TRANSFORMERS_VERBOSITY=error"
 set "TOKENIZERS_PARALLELISM=false"
@@ -18,6 +39,11 @@ if "%~1"=="RUN_BACKEND" goto RUN_BACKEND
 if "%~1"=="RUN_FRONTEND" goto RUN_FRONTEND
 if "%~1"=="RUN_CLEANUP" goto RUN_CLEANUP
 if "%~1"=="RUN_INSTALL_ENV" goto RUN_INSTALL_ENV
+if "%~1"=="" goto ARGUMENTS_OK
+echo [ERROR] Unknown option: %~1
+exit /b 1
+
+:ARGUMENTS_OK
 
 set "MEGATRON_DOCKER_WAIT_MAX=%MEGATRON_DOCKER_WAIT_MAX%"
 if not defined MEGATRON_DOCKER_WAIT_MAX set "MEGATRON_DOCKER_WAIT_MAX=80"
@@ -43,11 +69,65 @@ if "%choice%"=="" goto MENU
 if "%choice%"=="1" (
     if not exist ".runtime" mkdir ".runtime" >nul 2>&1
     del ".runtime\backend_port.txt" >nul 2>&1
+    echo.
+    echo ============================================
+    echo   openMegatron - Starting all services
+    echo ============================================
+    echo.
+    echo [1/3] Starting backend API...
     start "!TXT_WINDOW_BACKEND_API!" cmd /k call "%~f0" RUN_BACKEND API
+    echo         Waiting for backend to become ready...
     call :WAIT_FOR_FILE ".runtime\backend_port.txt" 90
-    if errorlevel 1 call :PRINT_I18N warn-backend-port
+    if errorlevel 1 (
+        call :PRINT_I18N warn-backend-port
+        echo [WARN] Backend port file not found, continuing anyway...
+    )
+    set /p BACKEND_PORT=<".runtime\backend_port.txt" 2>nul
+    if not defined BACKEND_PORT set "BACKEND_PORT=8000"
+    echo         Backend port: !BACKEND_PORT!
+    echo         Health-checking API...
+    call :HEALTH_CHECK_URL "http://127.0.0.1:!BACKEND_PORT!/runtime_status" 15 HC_RESULT
+    if errorlevel 1 (
+        echo [WARN] Backend API not responding yet on port !BACKEND_PORT!
+        echo        It may still be initializing. Check the backend window for details.
+    ) else (
+        echo [OK]  Backend API is healthy ^(port !BACKEND_PORT!^)
+    )
+    echo.
+    echo [2/3] Starting frontend...
     start "!TXT_WINDOW_FRONTEND!" cmd /k call "%~f0" RUN_FRONTEND
-    exit /b 0
+    echo         Waiting for frontend to become ready...
+    set /p FRONTEND_PORT=<".runtime\frontend_port.txt" 2>nul
+    if not defined FRONTEND_PORT set "FRONTEND_PORT=3000"
+    call :HEALTH_CHECK_URL "http://127.0.0.1:!FRONTEND_PORT!" 30 HC_RESULT
+    if errorlevel 1 (
+        echo [WARN] Frontend not responding yet on port !FRONTEND_PORT!
+        echo        It may still be installing dependencies. Check the frontend window.
+    ) else (
+        echo [OK]  Frontend is running ^(port !FRONTEND_PORT!^)
+    )
+    echo.
+    echo [3/3] Final health check...
+    call :HEALTH_CHECK_URL "http://127.0.0.1:!BACKEND_PORT!/runtime_status" 5 HC_RESULT
+    if errorlevel 1 (
+        echo [WARN] Final API health check failed.
+    ) else (
+        echo [OK]  All services responding.
+    )
+    echo.
+    echo ============================================
+    echo   openMegatron is running!
+    echo.
+    echo   Frontend:  http://localhost:!FRONTEND_PORT!
+    echo   Backend:   http://localhost:!BACKEND_PORT!
+    echo   API Docs:  http://localhost:!BACKEND_PORT!/docs
+    echo ============================================
+    echo.
+    echo Close the backend and frontend windows to stop.
+    echo.
+    echo Press any key to return to the launcher menu.
+    pause >nul
+    goto MENU
 )
 if "%choice%"=="2" (
     start "!TXT_WINDOW_BACKEND_CLI!" cmd /k call "%~f0" RUN_BACKEND CLI
@@ -65,6 +145,58 @@ if "%choice%"=="0" exit /b 0
 goto MENU
 
 goto :EOF
+
+:SHOW_HELP
+if not defined UNKNOWN_ARG goto QUICK_HELP
+echo [ERROR] Unknown option: %UNKNOWN_ARG%
+echo.
+goto QUICK_HELP
+
+:QUICK_HELP
+echo Megatron launcher usage:
+echo.
+echo   start.bat              Open the interactive menu
+echo   start.bat --help       Show this help
+echo.
+echo Menu options:
+echo   1  Start all services: backend API + frontend
+echo   2  Start Python backend only: CLI mode
+echo   3  Open cleanup manager
+echo   4  Install base environment: Python, Docker, Node.js
+echo   0  Exit
+if defined UNKNOWN_ARG exit /b 1
+exit /b 0
+
+:DISABLED_ZH_TEXT
+echo Megatron 启动器用法:
+echo.
+echo   start.bat              打开交互菜单
+echo   start.bat --help       显示帮助
+echo.
+echo 菜单选项:
+echo   1  启动全部（后端 API + 前端）
+echo   2  仅启动 Python 后端（CLI 模式）
+echo   3  清理管理器
+echo   4  安装基础环境（Python、Docker、Node.js）
+echo   0  退出
+goto HELP_DONE
+
+:HELP_EN
+echo Megatron launcher usage:
+echo.
+echo   start.bat              Open the interactive menu
+echo   start.bat --help       Show this help
+echo.
+echo Menu options:
+echo   1  Start all services (backend API + frontend)
+echo   2  Start Python backend only (CLI mode)
+echo   3  Open cleanup manager
+echo   4  Install base environment (Python, Docker, Node.js)
+echo   0  Exit
+
+:HELP_DONE
+if defined UNKNOWN_ARG exit /b 1
+exit /b 0
 
 :INIT_LANGUAGE
 if defined MEGATRON_LANG goto INIT_LANGUAGE_NORMALIZE
@@ -93,7 +225,7 @@ set "PORT_NAME=%~2"
 set "PS_SCRIPT=%TEMP%\check_port_%RANDOM%.ps1"
 > "%PS_SCRIPT%" echo $port = %PORT%
 >> "%PS_SCRIPT%" echo $portName = '%PORT_NAME%'
->> "%PS_SCRIPT%" echo $inUse = netstat -ano ^| Select-String ":%$port " ^| Select-String "LISTENING"
+>> "%PS_SCRIPT%" echo $inUse = netstat -ano ^| Select-String ":$port " ^| Select-String "LISTENING"
 >> "%PS_SCRIPT%" echo if ($inUse) {
 >> "%PS_SCRIPT%" echo     Write-Host "[WARN] Port $port ($portName) is already in use!"
 >> "%PS_SCRIPT%" echo     $inUse
@@ -106,7 +238,7 @@ set "PS_SCRIPT=%TEMP%\check_port_%RANDOM%.ps1"
 >> "%PS_SCRIPT%" echo             Write-Host "Process $processId killed."
 >> "%PS_SCRIPT%" echo         }
 >> "%PS_SCRIPT%" echo         Start-Sleep -Seconds 2
->> "%PS_SCRIPT%" echo         $still = netstat -ano ^| Select-String ":%$port " ^| Select-String "LISTENING"
+>> "%PS_SCRIPT%" echo         $still = netstat -ano ^| Select-String ":$port " ^| Select-String "LISTENING"
 >> "%PS_SCRIPT%" echo         if ($still) {
 >> "%PS_SCRIPT%" echo             Write-Host "[ERROR] Port $port still occupied."
 >> "%PS_SCRIPT%" echo             exit 1
@@ -143,6 +275,59 @@ if not "!%OUT_VAR%!"=="%START_PORT%" (
 )
 exit /b 0
 
+:STOP_STALE_BACKENDS
+set "PROJECT_ROOT=%CD%"
+set "PS_SCRIPT=%TEMP%\stop_megatron_backends_%RANDOM%.ps1"
+> "%PS_SCRIPT%" echo $root = [IO.Path]::GetFullPath('%PROJECT_ROOT%')
+>> "%PS_SCRIPT%" echo $ids = [System.Collections.Generic.HashSet[int]]::new()
+>> "%PS_SCRIPT%" echo $pidFile = Join-Path $root '.runtime\backend_pid.txt'
+>> "%PS_SCRIPT%" echo if (Test-Path $pidFile) {
+>> "%PS_SCRIPT%" echo   $pidText = Get-Content $pidFile -ErrorAction SilentlyContinue ^| Select-Object -First 1
+>> "%PS_SCRIPT%" echo   $pidValue = 0
+>> "%PS_SCRIPT%" echo   if ([int]::TryParse($pidText, [ref]$pidValue)) {
+>> "%PS_SCRIPT%" echo     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
+>> "%PS_SCRIPT%" echo     if ($proc -and $proc.CommandLine -and $proc.CommandLine -match 'agent\.py' -and $proc.CommandLine -match '--api') {
+>> "%PS_SCRIPT%" echo       [void]$ids.Add([int]$proc.ProcessId)
+>> "%PS_SCRIPT%" echo       $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue
+>> "%PS_SCRIPT%" echo       if ($parent -and $parent.CommandLine -and $parent.CommandLine -match 'agent\.py' -and $parent.CommandLine -match '--api') { [void]$ids.Add([int]$parent.ProcessId) }
+>> "%PS_SCRIPT%" echo     }
+>> "%PS_SCRIPT%" echo   }
+>> "%PS_SCRIPT%" echo }
+>> "%PS_SCRIPT%" echo $rootEsc = [regex]::Escape($root)
+>> "%PS_SCRIPT%" echo $procs = Get-CimInstance Win32_Process ^| Where-Object { $_.CommandLine -and $_.CommandLine -match 'agent\.py' -and $_.CommandLine -match '--api' -and $_.CommandLine -match $rootEsc }
+>> "%PS_SCRIPT%" echo foreach ($proc in $procs) { [void]$ids.Add([int]$proc.ProcessId) }
+>> "%PS_SCRIPT%" echo foreach ($id in $ids) {
+>> "%PS_SCRIPT%" echo   try {
+>> "%PS_SCRIPT%" echo     Stop-Process -Id $id -Force -ErrorAction Stop
+>> "%PS_SCRIPT%" echo     Write-Host "[INFO] Stopped stale Megatron backend PID $id."
+>> "%PS_SCRIPT%" echo   } catch {
+>> "%PS_SCRIPT%" echo     Write-Host "[WARN] Could not stop stale backend PID $id`: $($_.Exception.Message)"
+>> "%PS_SCRIPT%" echo   }
+>> "%PS_SCRIPT%" echo }
+>> "%PS_SCRIPT%" echo if ($ids.Count -gt 0) { Start-Sleep -Seconds 1 }
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%"
+del "%PS_SCRIPT%" 2>nul
+exit /b 0
+
+:STOP_STALE_FRONTENDS
+set "PROJECT_ROOT=%CD%"
+set "PS_SCRIPT=%TEMP%\stop_megatron_frontends_%RANDOM%.ps1"
+> "%PS_SCRIPT%" echo $root = [IO.Path]::GetFullPath('%PROJECT_ROOT%')
+>> "%PS_SCRIPT%" echo $rootEsc = [regex]::Escape($root)
+>> "%PS_SCRIPT%" echo $procs = @(Get-CimInstance Win32_Process ^| Where-Object { $_.CommandLine -and $_.CommandLine -match 'vite' -and $_.CommandLine -match $rootEsc })
+>> "%PS_SCRIPT%" echo foreach ($proc in $procs) {
+>> "%PS_SCRIPT%" echo   try {
+>> "%PS_SCRIPT%" echo     Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+>> "%PS_SCRIPT%" echo     Write-Host "[INFO] Stopped stale Megatron frontend PID $($proc.ProcessId)."
+>> "%PS_SCRIPT%" echo   } catch {
+>> "%PS_SCRIPT%" echo     Write-Host "[WARN] Could not stop stale frontend PID $($proc.ProcessId): $($_.Exception.Message)"
+>> "%PS_SCRIPT%" echo   }
+>> "%PS_SCRIPT%" echo }
+>> "%PS_SCRIPT%" echo if ($procs.Count -gt 0) { Start-Sleep -Seconds 1 }
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%"
+del "%PS_SCRIPT%" 2>nul
+exit /b 0
+
 :WAIT_FOR_FILE
 set "WAIT_FILE=%~1"
 set /a "WAIT_MAX=%~2"
@@ -154,6 +339,35 @@ if !WAIT_COUNT! geq !WAIT_MAX! exit /b 1
 call :SLEEP_SECONDS 1
 set /a "WAIT_COUNT+=1"
 goto WAIT_FOR_FILE_LOOP
+
+:HEALTH_CHECK_URL
+REM Usage: call :HEALTH_CHECK_URL "url" max_retries result_var
+REM Returns 0 (success) or 1 (failure), stores HTTP code in result_var
+set "HC_URL=%~1"
+set /a "HC_MAX=%~2"
+if "!HC_MAX!"=="0" set /a "HC_MAX=30"
+set /a "HC_COUNT=0"
+:HC_LOOP
+curl.exe -s -o nul -w "%%{http_code}" "!HC_URL!" > ".runtime\hc_tmp.txt" 2>nul
+set /p HC_CODE=<".runtime\hc_tmp.txt" 2>nul
+del ".runtime\hc_tmp.txt" >nul 2>&1
+if defined HC_CODE (
+    if "!HC_CODE!"=="200" (
+        if not "%~3"=="" set "%~3=!HC_CODE!"
+        exit /b 0
+    )
+    if "!HC_CODE!"=="302" (
+        if not "%~3"=="" set "%~3=!HC_CODE!"
+        exit /b 0
+    )
+)
+if !HC_COUNT! geq !HC_MAX! (
+    if not "%~3"=="" set "%~3=!HC_CODE!"
+    exit /b 1
+)
+set /a "HC_COUNT+=1"
+call :SLEEP_SECONDS 1
+goto HC_LOOP
 
 :RUN_INSTALL_ENV
 title Environment Installer
@@ -412,7 +626,10 @@ where python >nul 2>&1
 if !errorlevel! neq 0 (
     echo [ERROR] Python not found, installing...
     call :RUN_INSTALL_ENV
-    if !errorlevel! neq 0 pause & exit /b
+    if !errorlevel! neq 0 (
+        pause
+        exit /b 1
+    )
 )
 
 if not exist "venv" (
@@ -875,6 +1092,15 @@ if "!ENTRY_FILE!"=="" (
     exit /b
 )
 
+REM Quick config validation before launch
+echo [INFO] Validating configuration...
+venv\Scripts\python "scripts\validate_config.py" --quick --lang "%MEGATRON_LANG%" 2>nul
+if errorlevel 1 (
+    echo [WARN] Config validation found issues ^(non-blocking^) - see above for details.
+) else (
+    echo [OK] Configuration validated.
+)
+
 echo Setting PostgreSQL environment variables...
 set PGHOST=localhost
 set PGPORT=!PG_PORT!
@@ -895,6 +1121,8 @@ if "%~2"=="TEST" (
     ) else (
         set "BACKEND_PORT=8000"
     )
+    echo Checking for stale Megatron backend processes...
+    call :STOP_STALE_BACKENDS
     echo Finding backend port starting at !BACKEND_PORT!...
     call :FIND_FREE_PORT !BACKEND_PORT! BACKEND_PORT "FastAPI backend"
     if errorlevel 1 (
@@ -966,7 +1194,10 @@ exit /b 0
 title Megatron Frontend
 color 0E
 call :INSTALL_NODE
-if !errorlevel! neq 0 pause & exit /b
+if !errorlevel! neq 0 (
+    pause
+    exit /b 1
+)
 if not exist "package.json" (
     echo [ERROR] package.json not found. Make sure you are in the frontend root.
     pause
@@ -988,6 +1219,8 @@ if not exist "%NPM_CONFIG_CACHE%" mkdir "%NPM_CONFIG_CACHE%" >nul 2>&1
 set "FRONTEND_PORT=3000"
 for /f %%p in ('node -e "const fs=require('fs');let p=3000;try{const s=fs.readFileSync('config.toml','utf8');const m=s.match(/\\[frontend\\][\\s\\S]*?port\\s*=\\s*(\\d+)/);if(m)p=m[1]}catch(e){};console.log(p)"') do set "FRONTEND_PORT=%%p"
 if defined VITE_FRONTEND_PORT set "FRONTEND_PORT=!VITE_FRONTEND_PORT!"
+echo Checking for stale Megatron frontend processes...
+call :STOP_STALE_FRONTENDS
 echo Finding frontend port starting at !FRONTEND_PORT!...
 call :FIND_FREE_PORT !FRONTEND_PORT! FRONTEND_PORT "Vite dev server"
 if !errorlevel! neq 0 (

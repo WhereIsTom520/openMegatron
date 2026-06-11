@@ -98,6 +98,28 @@ class TopPaperSearchRoutingTests(unittest.TestCase):
         )
         self.assertLess(score, self.module.relevance_threshold("human-AI collaboration information systems"))
 
+    def test_openalex_traceability_survives_top_venue_filtering(self):
+        papers = [
+            {
+                "title": "Memory Matters: The Need to Improve Long-Term Memory in LLM-Agents",
+                "publication_year": 2024,
+                "authors": ["A. Researcher"],
+                "venue": "AAAI Symposium Series",
+                "cited_by_count": 30,
+                "doi": "10.1609/aaaiss.v2i1.27688",
+                "openalex_id": "https://openalex.org/W4400000000",
+                "url": "https://doi.org/10.1609/aaaiss.v2i1.27688",
+                "abstract": "LLM agents need long-term memory.",
+                "source_id": "https://openalex.org/S123",
+                "issn_clean": "",
+                "search_source_api": "OpenAlex",
+            }
+        ]
+        filtered = self.module.filter_papers(papers, year_start=2020, domain="ai")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["openalex_id"], "https://openalex.org/W4400000000")
+        self.assertEqual(filtered[0]["search_source_api"], "OpenAlex")
+
 
 if __name__ == "__main__":
     unittest.main()

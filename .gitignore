@@ -41,3 +41,12 @@ pysrc/cookies.txt
 Thumbs.db
 .vscode/
 .idea/
+
+# Root-level one-off patch artifacts
+/_patch_*.py
+/patch_*.py
+/fix_*.py
+/paper_*.tex
+/top_test_output.json
+/venues_check.json
+/skill_rollbacks.json

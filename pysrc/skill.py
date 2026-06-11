@@ -20,6 +20,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from runtime_engine import BaseTool
 from evolution import EvolutionError
+from repair_hook import RepairHook
+from skills.unified_validators import validate_not_empty as _validate_not_empty
+from skills.research.research_validators import validate_paper_count_in_range as _validate_paper_count
 
 
 def to_json(data: Any) -> str:
@@ -469,10 +472,10 @@ class RunSkillScriptTool(BaseTool):
         return response
 
     async def execute(self, skill_name: str, args_string: str = "", params_json: str = None, session_id: str = "default"):
-        if self.agent.broadcast_event:
-            await self.agent.broadcast_event("skill_start", {"skill_name": skill_name, "args": args_string[:200]})
-
         session_id = session_id or "default"
+        if self.agent.broadcast_event:
+            await self.agent.broadcast_event("skill_start", {"skill_name": skill_name, "args": args_string[:200], "session_id": session_id})
+
         if params_json and not args_string:
             args_string = params_json
         args_obj_for_repair, parse_error = self._parse_args_object(args_string)
@@ -508,6 +511,11 @@ class RunSkillScriptTool(BaseTool):
             )
             if not confirmed:
                 return denied(completed=False)
+        runtime_cfg = getattr(self.agent, "config", {}).get("runtime", {}) if getattr(self.agent, "config", None) else {}
+        timeout_sec = int(skill_info.get("timeout_sec") or runtime_cfg.get("skill_script_timeout_sec", 180))
+        last_repair_error = {"message": ""}
+        proc = None
+        _run_repair = None
         try:
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
@@ -521,27 +529,110 @@ class RunSkillScriptTool(BaseTool):
                 cwd=str(skill_info["dir"]),
                 env=env
             )
-            timeout_sec = getattr(self.agent.runtime, 'cpu_time_limit_sec', 3600)
+
+            async def _retry_skill_execution():
+                """Re-run the skill subprocess for auto-repair retries."""
+                env_r = os.environ.copy()
+                env_r["PYTHONIOENCODING"] = "utf-8"
+                args_list = [normalized_args_string]
+                proc_r = await asyncio.create_subprocess_exec(
+                    sys.executable, str(entry_py), *args_list,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    cwd=str(skill_info["dir"]), env=env_r
+                )
+                try:
+                    rc = getattr(self.agent, "config", {}).get("runtime", {}) if getattr(self.agent, "config", None) else {}
+                    t_sec = int(skill_info.get("timeout_sec") or rc.get("skill_script_timeout_sec", 180))
+                    stdout_r, stderr_r = await asyncio.wait_for(proc_r.communicate(), timeout=t_sec)
+                    sd = safe_decode(stdout_r)
+                    ed = safe_decode(stderr_r)
+                    if proc_r.returncode == 0:
+                        return self._normalize_script_success_output(resolved_name, sd)
+                    last_repair_error["message"] = ed or sd or f"Process exited with code {proc_r.returncode}"
+                    return None
+                except asyncio.TimeoutError:
+                    if proc_r.returncode is None:
+                        try: proc_r.kill(); await proc_r.communicate()
+                        except Exception: pass
+                    last_repair_error["message"] = f"Script execution timed out after {t_sec}s."
+                    return None
+                except Exception as ex:
+                    last_repair_error["message"] = str(ex)
+                    return None
+
+            skill_marker_text = f"{resolved_name} {skill_info.get('dir', '')}".lower()
+            research_markers = ("research", "paper", "citation", "zotero", "review", "literature", "journal")
+            _repair_validators = [_validate_paper_count(1)] if any(marker in skill_marker_text for marker in research_markers) else [_validate_not_empty]
+
+            async def _run_repair(original_message):
+                """Run RepairHook auto-repair; returns (result_dict_or_None, repair_trace_dict)."""
+                hook = RepairHook(agent=self.agent)
+                result = await hook.repair(
+                    task=_retry_skill_execution,
+                    task_name=resolved_name,
+                    context={"error_type": "skill_failure", "message": original_message},
+                    validators=_repair_validators,
+                    max_attempts=2,
+                )
+                if result["status"] == "success":
+                    repaired = result["result"]
+                    if isinstance(repaired, dict) and repaired.get("status") == "success":
+                        return repaired, None
+                trace = result.get("trace")
+                rt = {"attempts": trace.total_attempts, "final_success": trace.final_success, "last_error": last_repair_error["message"]} if trace else {}
+                return None, rt
+
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
             stdout_dec = safe_decode(stdout)
             stderr_dec = safe_decode(stderr)
             if proc.returncode == 0:
                 response = self._normalize_script_success_output(resolved_name, stdout_dec)
                 if self.agent.broadcast_event:
-                    await self.agent.broadcast_event("skill_end", {"skill_name": skill_name, "status": "success", "output_preview": stdout_dec[:200]})
+                    await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "success", "output_preview": stdout_dec[:200], "session_id": session_id})
                 return to_json(response)
             message = stderr_dec or stdout_dec or f"Process exited with code {proc.returncode}"
+            repaired_result, repair_trace = await _run_repair(message)
+            if repaired_result is not None:
+                if self.agent.broadcast_event:
+                    await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "success", "skill_repair": True, "output_preview": str(repaired_result)[:200], "session_id": session_id})
+                return to_json(repaired_result)
             if self.agent.broadcast_event:
-                await self.agent.broadcast_event("skill_end", {"skill_name": skill_name, "status": "error", "message": message[:200]})
-            return err(message, skill_name=resolved_name, completed=False)
+                await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "error", "message": message[:200], "session_id": session_id})
+            return err(message, skill_name=resolved_name, completed=False, repair_trace=repair_trace)
         except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.communicate()
+                except Exception:
+                    pass
+            message = f"Script execution timed out after {timeout_sec}s."
+            if _run_repair is None:
+                repair_trace = {"attempts": 0, "final_success": False, "last_error": message}
+                repaired_result = None
+            else:
+                repaired_result, repair_trace = await _run_repair(message)
+            if repaired_result is not None:
+                if self.agent.broadcast_event:
+                    await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "success", "skill_repair": True, "output_preview": str(repaired_result)[:200], "session_id": session_id})
+                return to_json(repaired_result)
             if self.agent.broadcast_event:
-                await self.agent.broadcast_event("skill_end", {"skill_name": skill_name, "status": "error", "message": "Execution timed out"})
-            return err("Script execution timed out.", skill_name=resolved_name, completed=False)
+                await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "error", "message": message[:200], "session_id": session_id})
+            return err(message, skill_name=resolved_name, completed=False, repair_trace=repair_trace)
         except Exception as e:
+            message = str(e)
+            if _run_repair is None:
+                repair_trace = {"attempts": 0, "final_success": False, "last_error": message}
+                repaired_result = None
+            else:
+                repaired_result, repair_trace = await _run_repair(message)
+            if repaired_result is not None:
+                if self.agent.broadcast_event:
+                    await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "success", "skill_repair": True, "output_preview": str(repaired_result)[:200], "session_id": session_id})
+                return to_json(repaired_result)
             if self.agent.broadcast_event:
-                await self.agent.broadcast_event("skill_end", {"skill_name": skill_name, "status": "error", "message": str(e)[:200]})
-            return err(str(e), skill_name=resolved_name, completed=False)
+                await self.agent.broadcast_event("skill_end", {"skill_name": resolved_name, "status": "error", "message": str(e)[:200], "session_id": session_id})
+            return err(str(e), skill_name=resolved_name, completed=False, repair_trace=repair_trace)
 
 
 class ReloadSkillsTool(BaseTool):

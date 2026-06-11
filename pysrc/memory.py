@@ -106,13 +106,17 @@ def load_config(config_path: str = "model.toml") -> dict:
 class MemoryService:
     _embed_semaphore = asyncio.Semaphore(4)
 
-    def __init__(self, pg_pool, neo4j_driver, redis_client, config: dict, embedder=None):
+    def __init__(self, pg_pool, neo4j_driver, redis_client, config: dict, embedder=None,
+                 graph_engine=None, cache_engine=None):
         self.pg_pool = pg_pool
         self.neo4j_driver = neo4j_driver
         self.redis = redis_client
         self.config = config
         self.embedder = embedder
         self.embed_dim = int(config.get("embedding", {}).get("dim", 1024))
+        # Multi-engine architecture
+        self.graph = graph_engine   # Neo4j — graph traversals
+        self.cache = cache_engine   # Redis — query cache + pub/sub
         memory_cfg = config.get("memory", {})
         runtime_cfg = config.get("runtime", {})
         self.short_term_ttl = int(memory_cfg.get("short_term_ttl", 86400))
@@ -752,6 +756,179 @@ class MemoryService:
         return memory_id
 
 
+
+
+    async def _upsert_ontology_node(self, conn, node_id, kind, label, properties=None):
+        import json as _j
+        d = chr(36)
+        await conn.execute(
+            "INSERT INTO ontology_nodes (id, kind, label, properties, created_at, updated_at) VALUES ("
+            + d + "1, " + d + "2, " + d + "3, " + d + "4::jsonb, NOW(), NOW())"
+            + " ON CONFLICT (id) DO UPDATE SET"
+            + " kind = EXCLUDED.kind, label = EXCLUDED.label, properties = EXCLUDED.properties, updated_at = NOW()",
+            node_id, kind, label[:500], _j.dumps(properties or {})
+        )
+        # Mirror to Neo4j for native graph traversals
+        if self.graph and self.graph.is_available():
+            await self.graph.upsert_node(node_id, kind, label, properties)
+
+    async def _upsert_link(self, conn, source_id, target_id, relation, confidence=1.0, metadata=None):
+        """Write a memory_link to PostgreSQL AND mirror to Neo4j."""
+        import json as _j
+        d = chr(36)
+        await conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, relation, confidence, metadata, created_at) VALUES ("
+            + d + "1, " + d + "2, " + d + "3, " + d + "4, " + d + "5::jsonb, NOW())"
+            + " ON CONFLICT (source_id, target_id, relation) DO UPDATE SET"
+            + " confidence = EXCLUDED.confidence, metadata = EXCLUDED.metadata",
+            source_id, target_id, relation, confidence, _j.dumps(metadata or {})
+        )
+        # Mirror to Neo4j
+        if self.graph and self.graph.is_available():
+            await self.graph.upsert_edge(source_id, target_id, relation, confidence, metadata)
+
+    async def _upsert_hyperedge_member(self, conn, hyperedge_id, node_id, role, node_kind, weight=1.0, metadata=None):
+        import json as _j
+        d = chr(36)
+        await conn.execute(
+            "INSERT INTO memory_hyperedge_members (hyperedge_id, node_id, role, weight, metadata, created_at) VALUES ("
+            + d + "1, " + d + "2, " + d + "3, " + d + "4, " + d + "5::jsonb, NOW())"
+            + " ON CONFLICT (hyperedge_id, node_id) DO UPDATE SET"
+            + " role = EXCLUDED.role, weight = EXCLUDED.weight, metadata = EXCLUDED.metadata",
+            hyperedge_id, node_id, role, weight, _j.dumps(metadata or {})
+        )
+
+    def ontology_node_id(self, kind, label):
+        raw = f"onto:{kind}:{label}"
+        return f"onto_{hashlib.sha256(raw.encode()).hexdigest()[:24]}"
+
+    async def query_ontology_nodes(self, kind=None, limit=200):
+        d = chr(36)
+        async with self.pg_pool.acquire() as conn:
+            if kind:
+                rows = await conn.fetch(
+                    "SELECT id, kind, label, properties, created_at FROM ontology_nodes WHERE kind = " + d + "1 ORDER BY created_at DESC LIMIT " + d + "2",
+                    kind, limit
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT id, kind, label, properties, created_at FROM ontology_nodes ORDER BY created_at DESC LIMIT " + d + "1",
+                    limit
+                )
+        result = []
+        for r in rows:
+            p = r["properties"]
+            result.append({"id": r["id"], "kind": r["kind"], "label": r["label"],
+                "properties": json.loads(p) if isinstance(p, str) else (p or {}),
+                "created_at": str(r["created_at"]) if r["created_at"] else None})
+        return result
+
+    async def query_hyperedges(self, edge_type=None, limit=100):
+        d = chr(36)
+        async with self.pg_pool.acquire() as conn:
+            if edge_type:
+                rows = await conn.fetch(
+                    "SELECT id, edge_type, label, summary, confidence, metadata, created_at FROM memory_hyperedges WHERE edge_type = " + d + "1 ORDER BY created_at DESC LIMIT " + d + "2",
+                    edge_type, limit
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT id, edge_type, label, summary, confidence, metadata, created_at FROM memory_hyperedges ORDER BY created_at DESC LIMIT " + d + "1",
+                    limit
+                )
+        result = []
+        for r in rows:
+            members = []
+            async with self.pg_pool.acquire() as conn2:
+                mrows = await conn2.fetch(
+                    "SELECT mh.node_id, mh.role, mh.weight, mh.metadata, o.kind, o.label FROM memory_hyperedge_members mh LEFT JOIN ontology_nodes o ON o.id = mh.node_id WHERE mh.hyperedge_id = " + d + "1",
+                    r["id"]
+                )
+                for mr in mrows:
+                    members.append({"node_id": mr["node_id"], "role": mr["role"],
+                        "kind": mr["kind"], "label": mr["label"], "weight": mr["weight"]})
+            md = r["metadata"]
+            result.append({"id": r["id"], "edge_type": r["edge_type"], "label": r["label"],
+                "summary": r["summary"], "confidence": r["confidence"],
+                "metadata": json.loads(md) if isinstance(md, str) else (md or {}),
+                "members": members,
+                "created_at": str(r["created_at"]) if r["created_at"] else None})
+        return result
+
+    async def query_hypergraph(self, limit_nodes=200, limit_edges=100):
+        nodes = await self.query_ontology_nodes(limit=limit_nodes)
+        hyperedges = await self.query_hyperedges(limit=limit_edges)
+        edges = []
+        for he in hyperedges:
+            for m in he.get("members", []):
+                edges.append({"id": he["id"] + "->" + m["node_id"],
+                    "source": he["id"], "target": m["node_id"],
+                    "type": "member", "label": m.get("role", "participant"),
+                    "edge_type": he["edge_type"]})
+        return {"nodes": nodes, "hyperedges": hyperedges, "edges": edges}
+
+    # ── Neo4j-powered graph traversals (with Redis caching) ──
+
+    async def graph_citation_path(self, from_id: str, to_id: str, max_depth: int = 5) -> dict:
+        """Find shortest citation path between two papers (Neo4j native)."""
+        if not self.graph or not self.graph.is_available():
+            return {"found": False, "error": "Neo4j unavailable"}
+        # Try Redis cache first
+        cache_key = {"from": from_id, "to": to_id, "depth": max_depth}
+        cached = await self.cache.get_cached_graph_query("citation_path", cache_key) if self.cache else None
+        if cached:
+            return cached
+        result = await self.graph.citation_path(from_id, to_id, max_depth)
+        if self.cache and result.get("found"):
+            await self.cache.cache_graph_query("citation_path", cache_key, result, ttl=300)
+        return result
+
+    async def graph_cited_by_chain(self, paper_id: str, depth: int = 2) -> dict:
+        """Multi-hop inbound citation chain (Neo4j native)."""
+        if not self.graph or not self.graph.is_available():
+            return {"error": "Neo4j unavailable"}
+        cache_key = {"paper": paper_id, "depth": depth}
+        cached = await self.cache.get_cached_graph_query("cited_by_chain", cache_key) if self.cache else None
+        if cached:
+            return cached
+        result = await self.graph.cited_by_chain(paper_id, depth)
+        if self.cache:
+            await self.cache.cache_graph_query("cited_by_chain", cache_key, result, ttl=300)
+        return result
+
+    async def graph_coauthor_network(self, author: str, depth: int = 2) -> dict:
+        """Co-authorship network (Neo4j native)."""
+        if not self.graph or not self.graph.is_available():
+            return {"error": "Neo4j unavailable"}
+        cache_key = {"author": author, "depth": depth}
+        cached = await self.cache.get_cached_graph_query("coauthor", cache_key) if self.cache else None
+        if cached:
+            return cached
+        result = await self.graph.coauthor_network(author, depth)
+        if self.cache:
+            await self.cache.cache_graph_query("coauthor", cache_key, result, ttl=600)
+        return result
+
+    async def graph_influential_papers(self, topic: str = "", limit: int = 10) -> list:
+        """Rank papers by citation count (Neo4j native)."""
+        if not self.graph or not self.graph.is_available():
+            return []
+        cache_key = {"topic": topic, "limit": limit}
+        cached = await self.cache.get_cached_graph_query("influential", cache_key) if self.cache else None
+        if cached:
+            return cached
+        result = await self.graph.find_influential_papers(topic, limit)
+        if self.cache:
+            await self.cache.cache_graph_query("influential", cache_key, result, ttl=300)
+        return result
+
+    async def graph_research_gaps(self, keyword: str, limit: int = 10) -> list:
+        """Find under-cited papers (Neo4j native)."""
+        if not self.graph or not self.graph.is_available():
+            return []
+        result = await self.graph.find_research_gaps(keyword, limit)
+        return result
+
 class MemoryDatabases:
     def __init__(self, config: dict, embedder=None):
         self.cfg = config
@@ -788,7 +965,20 @@ class MemoryDatabases:
             self.pg_pool = await asyncpg.create_pool(pg_dsn, min_size=1, max_size=int(pg_cfg.get("pool_max_size", 10)))
             async with self.pg_pool.acquire() as conn:
                 await self._init_schema(conn)
-            self.service = MemoryService(self.pg_pool, self.neo4j, self.redis, self.cfg, self.embedder)
+            # Initialize graph engine (Neo4j) and cache engine (Redis)
+            from graph_engine import GraphEngine
+            from cache_engine import CacheEngine
+            self.graph_engine = GraphEngine(self.neo4j, self.pg_pool)
+            self.cache_engine = CacheEngine(self.redis)
+            if self.neo4j:
+                await self.graph_engine.ensure_schema()
+                logger.info("GraphEngine (Neo4j) initialized")
+            logger.info("CacheEngine (Redis) initialized")
+            # Pass all three engines to MemoryService
+            self.service = MemoryService(
+                self.pg_pool, self.neo4j, self.redis, self.cfg, self.embedder,
+                graph_engine=self.graph_engine, cache_engine=self.cache_engine,
+            )
         except Exception as e:
             logger.critical(f"Postgres connect critical failed: {e}")
             raise CriticalDependencyError("Database connection failed")
@@ -966,6 +1156,52 @@ class MemoryDatabases:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_embedding ON workflow_patterns USING ivfflat (embedding vector_cosine_ops);")
         except Exception:
             pass
+
+        # -- Ontology nodes --
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ontology_nodes (
+                id VARCHAR PRIMARY KEY,
+                kind VARCHAR(64) NOT NULL,
+                label VARCHAR(500) NOT NULL,
+                properties JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_onto_kind ON ontology_nodes(kind);")
+        # -- Hyperedge table --
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_hyperedges (
+                id VARCHAR PRIMARY KEY,
+                edge_type VARCHAR(64) NOT NULL,
+                label VARCHAR(500),
+                summary TEXT,
+                confidence DOUBLE PRECISION DEFAULT 1.0,
+                metadata JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_hyper_type ON memory_hyperedges(edge_type);")
+        # -- Hyperedge member table --
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_hyperedge_members (
+                hyperedge_id VARCHAR NOT NULL REFERENCES memory_hyperedges(id) ON DELETE CASCADE,
+                node_id VARCHAR NOT NULL REFERENCES ontology_nodes(id) ON DELETE CASCADE,
+                role VARCHAR(64) DEFAULT 'participant',
+                weight DOUBLE PRECISION DEFAULT 1.0,
+                metadata JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (hyperedge_id, node_id)
+            );
+            """
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_member_node ON memory_hyperedge_members(node_id);")
 
     async def close(self):
         if self.redis:

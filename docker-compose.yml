@@ -23,6 +23,6 @@ services:
       NEO4J_AUTH: neo4j/root
       NEO4J_dbms_security_auth__minimum__password__length: 4
     ports:
-      - "7474:7474"
-      - "7781:7687"
+      - "7806:7474"
+      - "7807:7687"
     restart: always

@@ -27,6 +27,12 @@ from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageToolCa
 from openai.types.chat.chat_completion_message_tool_call import Function
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.redis import RedisJobStore
+from decision_tracker import DecisionTracker
+from model_tier import (
+    detect_model_tier, get_tier_config, MODEL_TIER_CONFIG,
+    adapt_system_rules, adapt_execution_contract, adapt_tool_schema,
+    suggest_subtasks, TierConfig,
+)
 
 try:
     import aiohttp
@@ -697,7 +703,15 @@ class YuanGeAgent:
             return value or default
 
         self.max_agent_steps = runtime_int("max_agent_steps", 30)
-        self.context_window_size = runtime_int("context_window_size", 16)
+        # Token-based context budget (not message count). Default 64K tokens.
+        # Supports "64K", "128K", "32K", or raw integer token counts.
+        raw_budget = runtime_cfg.get("context_window_budget", "64K")
+        if isinstance(raw_budget, str) and raw_budget.upper().endswith("K"):
+            self.context_token_budget = int(raw_budget.upper().replace("K", "")) * 1024
+        else:
+            self.context_token_budget = int(raw_budget) if raw_budget else 65536
+        # Legacy compat: context_window_size still used by some paths
+        self.context_window_size = max(runtime_int("context_window_size", 16), 32)
 
         for tool_cls in [
             SearchMemoryTool, MemorizeFactTool, AmendMemoryTool, UpdateCoreMemoryTool,
@@ -730,6 +744,27 @@ class YuanGeAgent:
         self.extra_params = {}
         self.client = None
         self.configure_llm(self.llm_provider, config.get("llm", {}).get("model"))
+
+        # ── Model tier detection ──
+        self.model_tier = detect_model_tier(self.model)
+        self.tier_config: TierConfig = get_tier_config(self.model)
+        # Apply tier-based limits (can be overridden by explicit runtime config)
+        if not runtime_cfg.get("context_window_budget"):
+            self.context_token_budget = self.tier_config.context_token_budget
+        if not runtime_cfg.get("max_agent_steps"):
+            self.max_agent_steps = self.tier_config.max_agent_steps
+        self.max_prompt_skills = min(
+            getattr(self, 'max_prompt_skills', 8),
+            self.tier_config.max_tools_in_prompt,
+        )
+        logger.info(
+            "Model tier: %s (%s) — %dK ctx, %d tools, %d repair attempts, %s rules",
+            self.model_tier, self.tier_config.label,
+            self.tier_config.context_token_budget // 1024,
+            self.tier_config.max_tools_in_prompt,
+            self.tier_config.max_repair_attempts,
+            self.tier_config.system_rules_mode,
+        )
         self.rules_file = BASE_DIR / "CLINICAL_RULES.md"
         self._conflict_detector_task = None
         self.fs_config = config.get("filesystem", {})
@@ -841,26 +876,56 @@ class YuanGeAgent:
                 pass
 
     @staticmethod
+    @staticmethod
     def _convert_parameters_to_schema(parameters: Any) -> dict:
+        """Build a rich JSON Schema from parameter definitions.
+
+        Supports: type, description, enum, pattern, examples, default, minimum,
+        maximum, minLength, maxLength, items (for arrays), properties (for nested objects),
+        and required marking.
+        """
         if isinstance(parameters, dict):
+            # Already a full JSON Schema
             if "type" in parameters and parameters["type"] == "object" and "properties" in parameters:
                 return parameters
             properties = {}
             required = []
             for key, val in parameters.items():
                 if isinstance(val, dict) and "type" in val:
-                    properties[key] = {
-                        "type": val["type"],
-                        "description": val.get("description", "")
-                    }
+                    prop = {"type": val["type"]}
+                    if "description" in val:
+                        prop["description"] = str(val["description"])
+                    if "enum" in val and isinstance(val["enum"], list):
+                        prop["enum"] = val["enum"]
+                    if "pattern" in val:
+                        prop["pattern"] = str(val["pattern"])
+                    if "examples" in val and isinstance(val["examples"], list):
+                        prop["examples"] = val["examples"]
+                    if "default" in val:
+                        prop["default"] = val["default"]
+                    if "minimum" in val:
+                        prop["minimum"] = val["minimum"]
+                    if "maximum" in val:
+                        prop["maximum"] = val["maximum"]
+                    if "minLength" in val:
+                        prop["minLength"] = val["minLength"]
+                    if "maxLength" in val:
+                        prop["maxLength"] = val["maxLength"]
+                    if val["type"] == "array" and "items" in val:
+                        prop["items"] = val["items"]
+                    if val["type"] == "object" and "properties" in val:
+                        prop["properties"] = YuanGeAgent._convert_parameters_to_schema(val["properties"])["properties"]
                     if val.get("required"):
                         required.append(key)
+                    properties[key] = prop
+                elif isinstance(val, str):
+                    # Shorthand: "param_name": "type" → auto-generate
+                    properties[key] = {"type": val, "description": key}
             if properties:
-                return {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required
-                }
+                schema: dict = {"type": "object", "properties": properties}
+                if required:
+                    schema["required"] = required
+                return schema
         return {"type": "object", "properties": {}}
 
     def _iter_skill_dirs(self) -> List[Path]:
@@ -2040,22 +2105,134 @@ class YuanGeAgent:
             markers.append("simple_question")
         return {"score": score, "markers": markers, "intent": intent, "category": category}
 
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Fast token estimator: ~4 chars/token for English, ~2 chars/token for CJK.
+        Falls back to tiktoken if available for precise counts."""
+        if not text:
+            return 0
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except Exception:
+            # Heuristic: count CJK chars separately (denser in tokens)
+            cjk = sum(1 for c in text if '一' <= c <= '鿿' or '㐀' <= c <= '䶿')
+            latin = len(text) - cjk
+            return cjk // 2 + latin // 4
+
+    @staticmethod
+    def _msg_tokens(msg: dict) -> int:
+        """Estimate token count for a single message dict."""
+        content = str(msg.get("content", ""))
+        # Add overhead for role and formatting (~4 tokens per message)
+        return YuanGeAgent._estimate_tokens(content) + 4
+
+    def _total_tokens(self, messages: list) -> int:
+        """Sum estimated tokens across message list."""
+        return sum(self._msg_tokens(m) for m in messages)
+
     async def _manage_context_window(self, session_id: str) -> List[dict]:
+        """Token-based context management with intelligent pruning.
+
+        Strategy:
+          1. Always keep the system prompt + last 4 exchanges (user+assistant pairs).
+          2. If total tokens exceed budget, progressively summarize older messages.
+          3. Tool outputs (identified by 'tool' role or [Tool prefix) are kept longer
+             than conversational filler.
+          4. Never discard the most recent assistant response (it may contain
+             in-progress tool calls).
+        """
         history = await self.ctx.get_history(session_id)
-        if len(history) >= self.context_window_size:
-            try:
-                sum_res = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": f"Summarize context:\n{history[:8]}"}],
-                    **self.extra_params)
-                await self.ctx.clear_history(session_id)
-                await self.ctx.add_history(session_id, "system", f"Context Summary: {sum_res.choices[0].message.content}")
-                for msg in history[8:]:
-                    await self.ctx.add_history(session_id, msg["role"], msg["content"])
-                history = await self.ctx.get_history(session_id)
-            except:
-                pass
-        return history
+        if not history:
+            return history
+
+        budget = getattr(self, 'context_token_budget', 65536)
+        total = self._total_tokens(history)
+
+        # If under budget, return as-is (but bump Redis cap to allow growth)
+        if total < budget * 0.85 and len(history) < 200:
+            return history
+
+        # ── Pruning strategy ──
+        # Reserve ~20% of budget for the response
+        target = int(budget * 0.75)
+
+        # Identify message types
+        keep_tail = 6  # Always keep last 6 messages
+        tail = history[-keep_tail:] if len(history) >= keep_tail else history
+        head = history[:-keep_tail] if len(history) > keep_tail else []
+
+        tail_tokens = self._total_tokens(tail)
+
+        # If even the tail exceeds target, we must compress
+        if tail_tokens > target:
+            # Emergency: keep only last 3, summarize rest
+            emergency_tail = history[-3:]
+            emergency_head = history[:-3]
+            summary_text = self._quick_summarize(emergency_head)
+            result = [{"role": "system", "content": f"[Context summary — {len(emergency_head)} earlier messages compressed]\n{summary_text}"}]
+            result.extend(emergency_tail)
+            await self._replace_history(session_id, result)
+            return result
+
+        # Normal pruning: keep tail, compress head progressively
+        remaining_budget = target - tail_tokens
+        kept_head = []
+        summarised = []
+
+        # Walk head from newest to oldest, keeping as much as fits
+        for msg in reversed(head):
+            mt = self._msg_tokens(msg)
+            # Tool outputs and assistant responses are high-value
+            is_high_value = (
+                msg.get("role") in ("assistant", "tool")
+                or "[Tool" in str(msg.get("content", ""))[:100]
+                or "```" in str(msg.get("content", ""))[:200]
+            )
+            if remaining_budget >= mt:
+                kept_head.insert(0, msg)
+                remaining_budget -= mt
+            elif is_high_value and remaining_budget > 50:
+                # Keep truncated version of high-value content
+                content = str(msg.get("content", ""))
+                trunc = content[:remaining_budget * 4] + "\n...[truncated]"
+                kept_head.insert(0, {"role": msg.get("role", "user"), "content": trunc})
+                remaining_budget = 0
+            else:
+                summarised.append(msg)
+
+        # If we have summarised messages, create a compressed summary
+        if summarised:
+            summary_text = self._quick_summarize(summarised)
+            summary_msg = {"role": "system", "content": f"[Compressed {len(summarised)} earlier messages]\n{summary_text}"}
+            kept_head.insert(0, summary_msg)
+
+        result = kept_head + tail
+        await self._replace_history(session_id, result)
+        return result
+
+    def _quick_summarize(self, messages: list) -> str:
+        """Fast extractive summary: pull user questions and key assistant decisions."""
+        lines = []
+        for m in messages[:20]:  # Sample at most 20
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            if role == "user" and len(content) > 5:
+                lines.append(f"- User asked: {content[:200]}")
+            elif role == "assistant" and len(content) > 10:
+                # Extract first meaningful sentence
+                first_line = content.strip().split("\n")[0][:200]
+                lines.append(f"- Assistant: {first_line}")
+            elif role == "tool":
+                lines.append(f"- Tool output: {content[:100]}")
+        return "\n".join(lines[:30]) if lines else "(no summary available)"
+
+    async def _replace_history(self, session_id: str, new_messages: list):
+        """Atomically replace the entire history with new_messages."""
+        await self.ctx.clear_history(session_id)
+        for msg in new_messages:
+            await self.ctx.add_history(session_id, msg.get("role", "user"), str(msg.get("content", "")), max_len=300)
 
     def _should_use_expert_debate(self, user_input: str, domain: str, experts: List[dict]) -> bool:
         if not experts or self.max_expert_opinions <= 0:
@@ -2282,6 +2459,9 @@ class YuanGeAgent:
 
     def _detect_skill_category(self, user_input: str) -> str:
         lowered = self._normalize_text(user_input)
+        repaired = self._repair_mojibake_text(str(user_input or "")).lower()
+        if self._looks_like_research_discussion(repaired):
+            return "research"
         category_keywords = {
             "research": [
                 "科研", "论文", "文献", "综述", "引用", "citation", "bibtex", "zotero",
@@ -2420,15 +2600,62 @@ class YuanGeAgent:
         max_prompt = max(top_k, min(max_prompt, self.max_prompt_skills))
         return top_k, max_prompt
 
+    def _skill_allowed_for_request(self, skill_name: str, user_input: str) -> bool:
+        name = str(skill_name or "").lower()
+        lowered = self._normalize_text(user_input)
+        repaired = self._repair_mojibake_text(str(user_input or "")).lower()
+        if self._looks_like_research_discussion(repaired):
+            if any(marker in name for marker in ("bilibili", "video", "download", "media", "subtitle", "audio")):
+                return False
+            if name in {"code_assistant", "write_and_execute_script"} and not self._has_explicit_code_intent(repaired):
+                return False
+        if name == "zotero_manager":
+            explicit_zotero_terms = (
+                "zotero", "bibtex", "文献库", "本地文献", "导出引用",
+                "导出 bib", "参考文献库", "zotero desktop",
+            )
+            return any(term in lowered for term in explicit_zotero_terms)
+        return True
+
+    def _looks_like_research_discussion(self, text: str) -> bool:
+        text = self._repair_mojibake_text(str(text or "")).lower()
+        research_markers = (
+            "科研", "论文", "文献", "综述", "顶刊", "顶会", "期刊", "会议",
+            "研究空白", "研究方向", "研究问题", "创新点", "参考文献",
+            "智能体记忆", "agent memory", "llm agent", "llm-based agent",
+            "多智能体", "共享记忆", "社会记忆", "记忆冲突", "记忆拓扑",
+        )
+        advice_markers = (
+            "从哪下手", "如何下手", "怎么下手", "切入", "合理", "方向",
+            "选题", "课题", "研究", "方案", "实验设计", "发表",
+        )
+        return any(marker in text for marker in research_markers) and (
+            any(marker in text for marker in advice_markers)
+            or any(marker in text for marker in ("论文", "文献", "综述", "顶刊", "顶会", "研究空白"))
+        )
+
+    def _has_explicit_code_intent(self, text: str) -> bool:
+        text = self._repair_mojibake_text(str(text or "")).lower()
+        code_markers = (
+            "代码", "编程", "程序", "开发", "实现", "修复", "调试", "报错",
+            "重构", "单元测试", "接口", "后端", "前端", "typescript", "javascript",
+            "python", "code", "implement", "debug", "bug", "fix", "refactor",
+        )
+        return any(marker in text for marker in code_markers)
+
     def _select_skills_for_prompt(self, user_input: str, ranked: list = None, budget: tuple[int, int] = None) -> dict:
         selected = {}
         ranked = ranked if ranked is not None else self._rank_skills(user_input)
         active_category = self._detect_skill_category(user_input)
         top_k, max_prompt = budget or self._skill_budget_for_task(user_input)
         for _, name, info in ranked[:top_k]:
+            if not self._skill_allowed_for_request(name, user_input):
+                continue
             selected[name] = info
         lowered = self._normalize_text(user_input)
         for name, info in self.loaded_skills.items():
+            if not self._skill_allowed_for_request(name, user_input):
+                continue
             if active_category and info.get("category", "general") not in (active_category, "general"):
                 continue
             keywords = [str(x).lower() for x in info.get("keywords", []) or []]
@@ -2440,6 +2667,11 @@ class YuanGeAgent:
             elif lex_score >= 0.8:
                 selected[name] = info
         selected = self._expand_skills_by_task(user_input, selected)
+        selected = {
+            name: info
+            for name, info in selected.items()
+            if self._skill_allowed_for_request(name, user_input)
+        }
         if len(selected) > max_prompt:
             intent = self._detect_task_intent(user_input)
             def priority(item):
@@ -2574,6 +2806,31 @@ class YuanGeAgent:
         )
         return any(term in text for term in lookup_terms) and not any(term in text for term in deep_terms)
 
+    def _should_use_deterministic_research_answer(self, payload: dict, user_input: str) -> bool:
+        if not isinstance(payload, dict) or not payload.get("papers"):
+            return False
+        text = self._repair_mojibake_text(str(user_input or "")).lower()
+        lookup_terms = (
+            "检索", "搜索", "查找", "找一下", "论文", "文献", "paper", "papers",
+            "literature", "doi", "链接", "link", "links", "白名单", "top venue",
+            "top conference", "top journal",
+        )
+        synthesis_terms = (
+            "综述", "review", "研究空白", "future direction", "未来方向", "对比",
+            "compare", "设计", "research question", "citation_graph", "引用图",
+            "引文图", "引用关系", "关系图", "图谱", "文献列表", "列表视图",
+            "citation graph", "全文", "full text", "read",
+        )
+        return any(term in text for term in lookup_terms) and not any(term in text for term in synthesis_terms)
+
+    def _should_use_deterministic_abstract_answer(self, payload: dict, user_input: str) -> bool:
+        if not isinstance(payload, dict) or not payload.get("papers"):
+            return False
+        text = self._repair_mojibake_text(str(user_input or "")).lower()
+        abstract_terms = ("摘要", "abstract", "详细信息", "详细摘要", "读取这些", "读取论文")
+        paper_terms = ("论文", "文献", "paper", "papers", "顶会", "顶刊")
+        return any(term in text for term in abstract_terms) and any(term in text for term in paper_terms)
+
     def _skill_name_from_tool_arguments(self, arguments: str) -> str:
         try:
             outer = json.loads(arguments or "{}")
@@ -2605,6 +2862,166 @@ class YuanGeAgent:
             if (isinstance(valid_count, int) and valid_count > 0) or papers:
                 return True
         return False
+
+    def _unwrap_skill_payload(self, parsed: Any) -> dict:
+        if not isinstance(parsed, dict):
+            return {}
+        payload = parsed
+        raw_output = parsed.get("output")
+        if isinstance(raw_output, str):
+            try:
+                decoded_output = json.loads(raw_output)
+                if isinstance(decoded_output, dict):
+                    payload = decoded_output
+            except Exception:
+                pass
+        return payload if isinstance(payload, dict) else {}
+
+    def _latest_research_payload_from_trace(self, task_trace: dict) -> dict:
+        research_skills = {"paper_fetch_review", "review_pipeline"}
+        for call in reversed(task_trace.get("tool_calls", []) or []):
+            if call.get("tool") != "run_skill_script":
+                continue
+            skill_name = self._skill_name_from_tool_arguments(str(call.get("arguments") or ""))
+            if skill_name not in research_skills:
+                continue
+            payload = self._unwrap_skill_payload(call.get("parsed_output"))
+            if payload.get("status") == "error":
+                continue
+            if payload.get("papers") or payload.get("verification_matrix") or payload.get("reference_verification"):
+                return payload
+        return {}
+
+    @staticmethod
+    def _markdown_cell(value: Any, max_chars: int = 80) -> str:
+        text = str(value or "-").replace("|", "\\|").replace("\n", " ").strip()
+        return text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+    def _primary_reference_link(self, item: dict, paper: dict | None = None) -> str:
+        links_info = item.get("links_info") if isinstance(item, dict) else {}
+        links = links_info.get("links", {}) if isinstance(links_info, dict) else {}
+        for key in ("doi", "openalex", "publisher", "url"):
+            value = links.get(key)
+            if value:
+                return str(value)
+        paper = paper or {}
+        doi = str(item.get("doi") or paper.get("doi") or "").strip()
+        if doi:
+            return "https://doi.org/" + doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+        openalex_id = str(item.get("openalex_id") or paper.get("openalex_id") or "").strip()
+        if openalex_id:
+            return openalex_id if openalex_id.startswith("http") else "https://openalex.org/" + openalex_id
+        return str(paper.get("url") or "-")
+
+    @staticmethod
+    def _reference_link_status(item: dict) -> str:
+        links_info = item.get("links_info") if isinstance(item, dict) else {}
+        if not isinstance(links_info, dict):
+            return "待确认"
+        if links_info.get("reachable") is True:
+            return "实时可达"
+        if links_info.get("reachable") is False:
+            return "不可达"
+        if links_info.get("traceable"):
+            return "可追踪，未实时验证"
+        return "待确认"
+
+    def _format_research_lookup_answer(self, payload: dict, user_input: str) -> str:
+        papers = payload.get("papers") or []
+        matrix = payload.get("verification_matrix") or []
+        if not isinstance(papers, list) or not papers:
+            return ""
+        if not isinstance(matrix, list):
+            matrix = []
+        matrix_by_index = {
+            int(item.get("index")): item
+            for item in matrix
+            if isinstance(item, dict) and str(item.get("index") or "").isdigit()
+        }
+        title = "检索完成。以下是白名单顶会/顶刊命中结果"
+        valid_count = payload.get("valid_count")
+        count_text = valid_count if isinstance(valid_count, int) else len(papers)
+        lines = [
+            f"{title}（共 {count_text} 篇）：",
+            "",
+            "### 白名单命中论文",
+            "| # | 标题 | 年份 | 会议/期刊 | 引用 | DOI/链接 |",
+            "|---|------|------|-----------|------|----------|",
+        ]
+        for idx, paper in enumerate(papers, start=1):
+            if not isinstance(paper, dict):
+                continue
+            verifier = matrix_by_index.get(idx, {})
+            link = self._primary_reference_link(verifier, paper)
+            lines.append(
+                f"| {idx} | {self._markdown_cell(paper.get('title'), 56)} | "
+                f"{self._markdown_cell(paper.get('year') or paper.get('publication_year'), 8)} | "
+                f"{self._markdown_cell(paper.get('venue'), 34)} | "
+                f"{self._markdown_cell(paper.get('citations') or paper.get('cited_by_count') or 0, 8)} | "
+                f"{self._markdown_cell(link, 70)} |"
+            )
+        if matrix:
+            lines.extend([
+                "",
+                "### 引用与反幻觉验证矩阵",
+                "| # | 元数据来源 | DOI / 链接 | 链接状态 | 幻觉风险 | 证据边界 |",
+                "|---|------------|------------|----------|----------|----------|",
+            ])
+            for idx, paper in enumerate(papers, start=1):
+                verifier = matrix_by_index.get(idx, {})
+                if not verifier:
+                    continue
+                link = self._primary_reference_link(verifier, paper if isinstance(paper, dict) else {})
+                status = self._reference_link_status(verifier)
+                risk = verifier.get("hallucination_risk") or "unknown"
+                source = verifier.get("metadata_source") or "unknown"
+                if status == "实时可达":
+                    boundary = "仅表示链接现场访问成功；全文结论仍需核验"
+                elif status == "可追踪，未实时验证":
+                    boundary = "仅表示题录有 DOI/OpenAlex 可追踪标识；未声明 HTTP 可达"
+                elif status == "不可达":
+                    boundary = "现场访问失败或返回错误；需人工复核"
+                else:
+                    boundary = "缺少可追踪标识；需人工确认"
+                lines.append(
+                    f"| {idx} | {self._markdown_cell(source, 28)} | {self._markdown_cell(link, 70)} | "
+                    f"{status} | {self._markdown_cell(risk, 10)} | {boundary} |"
+                )
+        ref_verification = payload.get("reference_verification") if isinstance(payload.get("reference_verification"), dict) else {}
+        boundary = ref_verification.get("boundary") or (
+            "该结果基于结构化题录元数据、白名单 venue 匹配和 DOI/OpenAlex 可追踪标识；除非链接状态明确为“实时可达”，否则不代表现场 HTTP 访问成功。"
+        )
+        lines.extend(["", f"证据边界：{boundary}"])
+        return "\n".join(lines)
+
+    def _format_paper_abstract_answer(self, payload: dict, user_input: str) -> str:
+        papers = payload.get("papers") or []
+        if not isinstance(papers, list) or not papers:
+            return ""
+        lines = [
+            f"已读取可用元数据摘要（共 {len(papers)} 篇）：",
+            "",
+        ]
+        for idx, paper in enumerate(papers, start=1):
+            if not isinstance(paper, dict):
+                continue
+            title = paper.get("title") or f"Paper {idx}"
+            year = paper.get("year") or paper.get("publication_year") or "-"
+            venue = paper.get("venue") or "-"
+            doi = paper.get("doi") or "-"
+            abstract = str(paper.get("abstract") or "").strip()
+            if not abstract:
+                abstract = "未在当前题录元数据中提供摘要；不能据此补写实验细节或结论。"
+            lines.extend([
+                f"### {idx}. {title}",
+                f"- 年份：{year}",
+                f"- 会议/期刊：{venue}",
+                f"- DOI/链接：{doi}",
+                f"- 摘要：{abstract}",
+                "",
+            ])
+        lines.append("证据边界：以上只来自检索工具返回的题录元数据和摘要字段；若摘要缺失，不推断论文实验设置、数据集或定量结论。")
+        return "\n".join(lines)
 
     def _blocked_extra_research_tool_output(self, skill_name: str) -> str:
         return json.dumps({
@@ -2679,19 +3096,31 @@ class YuanGeAgent:
         else:
             os_policy = f"0. Identity ({os_name}): Use standard shell commands."
         rules = (
+            # ── Universal rules (0-5) ──
             "0. FAILURE HANDLING: If a tool or skill returns an error, read the error message, repair the inputs once, and retry only when the repair is clear. If the same operation fails again, stop and report the error.\n"
             "1. OBJECTIVE DECOMPOSITION: Treat the user request as an objective with required inputs, intermediate outputs, and final outputs. If one tool cannot complete the objective because required inputs are missing, split the objective into smaller tool steps.\n"
             "2. INPUT COMPLETION: Before asking the user for missing information, inspect Available Skills to see whether another skill can produce or infer the missing input. Use earlier tool outputs as later tool inputs.\n"
             "3. DIRECT EXECUTION: If the user already provided all required inputs for a matching skill, call that skill directly and avoid unnecessary discovery steps.\n"
             "4. TOOL CONTRACT: For run_skill_script, args_string must be exactly one valid JSON object string containing the skill parameters. Never pass plain text, markdown, command-line flags, or an empty object when required fields are known.\n"
             "5. PARAMETER REPAIR: If a skill fails because of malformed arguments, correct the JSON in the very next call. Preserve user constraints such as output path, format, language, resolution, time range, and mode.\n"
+            # ── Research rules (6-7b) ──
             "6. AMBIGUITY: If tool-produced candidates are clearly ranked or one candidate best matches the request, choose it. Ask the user only when candidates are genuinely ambiguous or when no available skill can resolve the missing input.\n"
             "7. TOOL MINIMALITY: Use the smallest reliable chain of tools. Do not install new skills, write replacement scripts, or switch strategies when existing loaded skills can satisfy the objective.\n"
             "7a. RESEARCH TOOL MINIMALITY: For simple paper lookup or link requests, call paper_fetch_review once with the user's topic, year range, and inferred domain, then answer from that result. Use review_pipeline for literature reviews, evidence_matrix for matrix requests, and paper_reader/citation_graph only when the user explicitly asks for full-paper reading, citation graph, verification, or deeper expansion.\n"
-            "8. SKILL COMPOUNDING: When write_and_execute_script succeeds and the user confirms the script is generally useful, call promote_script_to_skill instead of leaving the solution as a one-off script.\n"
-            "9. SAFETY AND FILESYSTEM: Use available tools within the configured safety policy. The runtime enforces configured write-path restrictions before execution.\n"
-            "10. TURN BOUNDARIES: Tool calls must serve the current user request. If the latest message is a follow-up, anchor it to the immediate previous user request instead of resuming older goals.\n"
-            "11. TOOL FORMAT: Use the API tool_calls field for tools. Never write DSML/XML/markdown tool-call markup in assistant text.\n"
+            "7b. RESEARCH VERIFICATION VISIBILITY: If a research skill output contains verification_matrix, reference_verification, link_checks, or citation_verification, the final answer must include a visible '引用与反幻觉验证矩阵' / 'Reference Verification Matrix' section with per-reference source, DOI/link, link status, hallucination risk, and evidence boundary. Do not replace this with a generic link list.\n"
+            # ── Engineering rules (8-14) ──
+            "8. READ BEFORE WRITE: Never edit a file you haven't read. Use code_assistant read or search to understand the code first. Editing without reading causes bugs from incorrect assumptions about existing structure.\n"
+            "9. EXPLORATION STRATEGY: For unknown codebases: (a) inspect → understand structure, (b) search → find relevant files, (c) read → understand the specific code, (d) edit → make changes. Never skip from inspect directly to edit.\n"
+            "10. GIT SAFETY: Before any destructive edit (rename, refactor, delete), create a code_refactor snapshot. After edits, run code_assistant git_diff to review changes. If the user accepts, they can commit. If something breaks, restore the snapshot.\n"
+            "11. TEST-DRIVEN WORKFLOW: Before fixing a bug, reproduce it. After fixing, run the test suite. If tests fail, read the failure output carefully before attempting a second fix. Do not guess at fixes — let error messages guide you.\n"
+            "12. ERROR TRACEBACK LITERACY: When a command fails, read the full stderr output. Find the first error (not the last). Identify the file and line number. Read that file at that location. Fix the root cause, not the symptom.\n"
+            "13. MULTI-FILE COORDINATION: When a change affects multiple files (e.g., renaming a function), plan the full set of edits before making the first one. List all affected files. Make edits in dependency order (callee before caller for definitions, caller before callee for deletions).\n"
+            "14. CODE QUALITY GATES: After making changes: (a) run the linter, (b) run the type checker, (c) run the test suite. If any gate fails, fix the issues before reporting success. A change that breaks tests is not complete.\n"
+            # ── Compound and safety (15-17) ──
+            "15. SKILL COMPOUNDING: When write_and_execute_script succeeds and the user confirms the script is generally useful, call promote_script_to_skill instead of leaving the solution as a one-off script.\n"
+            "16. SAFETY AND FILESYSTEM: Use available tools within the configured safety policy. The runtime enforces configured write-path restrictions before execution.\n"
+            "17. TURN BOUNDARIES: Tool calls must serve the current user request. If the latest message is a follow-up, anchor it to the immediate previous user request instead of resuming older goals.\n"
+            "18. TOOL FORMAT: Use the API tool_calls field for tools. Never write DSML/XML/markdown tool-call markup in assistant text.\n"
         )
         static_prompt = (
             f"{self.domain_meta.get(domain, {}).get('system_prompt', '')}\n\n"
@@ -2723,6 +3152,10 @@ class YuanGeAgent:
             "- If the next operation lacks an input, first check whether another available skill can produce that input.\n"
             "- Chain tool outputs into later tool inputs when that directly advances the user's objective.\n"
             "- For research lookup/link requests, do not fan out across multiple research skills after a usable paper_fetch_review result. Summarize the returned papers and clearly state the evidence boundary.\n"
+            "- When research outputs include verification_matrix/reference_verification/link_checks/citation_verification, show those checks explicitly as a compact table. Include metadata source, DOI or primary link, link status, hallucination risk, and what the check does not prove.\n"
+            "- For coding tasks: read files before editing, create git snapshots before destructive changes, run tests after changes, and report test results.\n"
+            "- For code search: prefer code_assistant search over raw grep; use code_assistant symbols to understand structure; use code_review to find issues before editing.\n"
+            "- For debugging: reproduce the error first, read the full traceback, find the root cause file+line, read that code, then fix. Do not guess.\n"
             "- Ask the user only for missing inputs that cannot be produced by available skills or are genuinely ambiguous.\n"
             "- Preserve user constraints such as output folder, format, resolution, language, mode, time range, and file type.\n"
             "- Treat past workflow patterns as suggestions, not commands. Verify current skills and parameters before reusing a chain.\n"
@@ -2770,6 +3203,69 @@ class YuanGeAgent:
     @staticmethod
     def _json_dumps_safe(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _message_role(message: Any) -> str:
+        if isinstance(message, dict):
+            return str(message.get("role") or "")
+        return str(getattr(message, "role", "") or "")
+
+    @staticmethod
+    def _message_tool_call_id(message: Any) -> str:
+        if isinstance(message, dict):
+            return str(message.get("tool_call_id") or "")
+        return str(getattr(message, "tool_call_id", "") or "")
+
+    @staticmethod
+    def _message_tool_call_ids(message: Any) -> list[str]:
+        if isinstance(message, dict):
+            tool_calls = message.get("tool_calls") or []
+        else:
+            tool_calls = getattr(message, "tool_calls", None) or []
+        ids: list[str] = []
+        for call in tool_calls:
+            call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", "")
+            if call_id:
+                ids.append(str(call_id))
+        return ids
+
+    def _sanitize_openai_tool_message_sequence(self, messages: list[Any]) -> list[Any]:
+        """Ensure every assistant tool_call is immediately followed by matching tool messages."""
+        sanitized: list[Any] = []
+        i = 0
+        while i < len(messages):
+            message = messages[i]
+            role = self._message_role(message)
+            if role == "tool":
+                i += 1
+                continue
+            tool_call_ids = self._message_tool_call_ids(message)
+            if role != "assistant" or not tool_call_ids:
+                sanitized.append(message)
+                i += 1
+                continue
+            sanitized.append(message)
+            answered: set[str] = set()
+            j = i + 1
+            while j < len(messages) and self._message_role(messages[j]) == "tool":
+                tool_call_id = self._message_tool_call_id(messages[j])
+                if tool_call_id in tool_call_ids and tool_call_id not in answered:
+                    sanitized.append(messages[j])
+                    answered.add(tool_call_id)
+                j += 1
+            for tool_call_id in tool_call_ids:
+                if tool_call_id not in answered:
+                    sanitized.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": json.dumps({
+                            "status": "error",
+                            "message": "Tool response was missing and was replaced by the agent message sanitizer.",
+                            "completed": False,
+                        }, ensure_ascii=False),
+                    })
+            i = j
+        return sanitized
 
     def _filter_relevant_past_patterns(self, query: str, patterns: list[dict], limit: int = 3) -> list[dict]:
         if not patterns:
@@ -3019,6 +3515,8 @@ class YuanGeAgent:
         }
         allowed_paths_str = ", ".join(self.allowed_paths) if self.allowed_paths else "No restrictions (workspace only)"
         static_system = self._build_static_system_prompt(domain)
+        # Adapt system prompt to model tier
+        static_system = adapt_system_rules(self.tier_config, static_system)
         plan_hint = self._build_plan_hint(routing_input, selected_skills)
         dynamic_system = self._build_dynamic_system_prompt(
             allowed_paths_str,
@@ -3027,6 +3525,14 @@ class YuanGeAgent:
             skill_instructions,
             plan_hint
         )
+        # Adapt execution contract to model tier
+        # Find the contract section and replace it
+        contract_marker = "Execution Contract:"
+        if contract_marker in dynamic_system and self.tier_config.execution_contract_mode != "full":
+            pre = dynamic_system.split(contract_marker)[0]
+            contract = contract_marker + dynamic_system.split(contract_marker)[1]
+            adapted_contract = adapt_execution_contract(self.tier_config, contract)
+            dynamic_system = pre + adapted_contract
         msgs = [{"role": "system", "content": static_system}]
         msgs.extend(history_without_current)
         msgs.append({"role": "system", "content": dynamic_system})
@@ -3044,6 +3550,7 @@ class YuanGeAgent:
         skill_failures = {}
         for step in range(self.max_agent_steps):
             try:
+                msgs = self._sanitize_openai_tool_message_sequence(msgs)
                 res = await self.client.chat.completions.create(
                     model=self.model, messages=msgs,
                     tools=self.tool_manager.get_schemas(), tool_choice="auto",
@@ -3085,6 +3592,7 @@ class YuanGeAgent:
                 task_completed = False
                 ordered_tool_calls = []
                 tool_tasks = []
+                delayed_system_messages = []
 
                 async def execute_one_tool_call(tc):
                     started_perf = time.perf_counter()
@@ -3096,6 +3604,7 @@ class YuanGeAgent:
                             routing_input,
                         )
                         installed_skill_first_tools = {
+                            "execute_system_command",
                             "write_and_execute_script",
                             "install_github_skill",
                             "register_new_tool",
@@ -3110,6 +3619,12 @@ class YuanGeAgent:
                             )
                         ):
                             out_value = self._blocked_script_tool_output(tc.function.name)
+                        elif (
+                            tc.function.name == "run_skill_script"
+                            and self._skill_name_from_tool_arguments(tool_arguments) == "paper_fetch_review"
+                            and self._trace_has_successful_paper_fetch(task_trace)
+                        ):
+                            out_value = self._blocked_extra_research_tool_output("paper_fetch_review")
                         elif (
                             tc.function.name == "run_skill_script"
                             and self._is_simple_research_lookup(routing_input)
@@ -3150,7 +3665,7 @@ class YuanGeAgent:
                     if repeat_count >= 2:
                         notification_msg = f"Agent is repeating the same tool call: {tc.function.name} with arguments {tc.function.arguments}. This may indicate a persistent failure. Please check logs or interrupt."
                         await self.ctx.push_notification(session_id, notification_msg)
-                        msgs.append({"role": "system", "content": notification_msg})
+                        delayed_system_messages.append({"role": "system", "content": notification_msg})
                         repeat_count = 0
                     if self.broadcast_event:
                         await self.broadcast_event("tool_start", {"name": tc.function.name, "arguments": tc.function.arguments, "session_id": session_id})
@@ -3169,7 +3684,23 @@ class YuanGeAgent:
                     if not isinstance(out, str):
                         out = str(out)
                     if self.broadcast_event:
-                        await self.broadcast_event("tool_end", {"name": tc.function.name, "output_preview": out[:200], "session_id": session_id})
+                        tool_status = "success"
+                        try:
+                            parsed = json.loads(out) if isinstance(out, str) else out
+                            if isinstance(parsed, dict):
+                                st = parsed.get("status", "")
+                                if st in ("error", "fail", "failure"):
+                                    tool_status = "error"
+                        except Exception:
+                            if "error" in str(out).lower()[:500]:
+                                tool_status = "error"
+                        await self.broadcast_event("tool_end", {
+                            "name": tc.function.name,
+                            "status": tool_status,
+                            "output_preview": out[:200],
+                            "session_id": session_id,
+                            "duration_ms": tool_result.get("duration_ms", 0),
+                        })
                     parsed_out_for_trace = None
                     try:
                         parsed_out_for_trace = json.loads(out)
@@ -3226,6 +3757,7 @@ class YuanGeAgent:
                             task_completed = True
                     except:
                         pass
+                msgs.extend(delayed_system_messages)
                 if task_completed:
                     msgs.append({
                         "role": "system",
@@ -3240,7 +3772,14 @@ class YuanGeAgent:
                 if textual_tool_markup:
                     ans = "模型输出了无法解析的文本态工具调用，已阻止原样返回。请重试当前请求。"
                 else:
-                    ans = msg.content or "Task completed."
+                    research_payload = self._latest_research_payload_from_trace(task_trace)
+                    if self._should_use_deterministic_abstract_answer(research_payload, routing_input):
+                        deterministic_research_answer = self._format_paper_abstract_answer(research_payload, user_input)
+                    elif self._should_use_deterministic_research_answer(research_payload, routing_input):
+                        deterministic_research_answer = self._format_research_lookup_answer(research_payload, user_input)
+                    else:
+                        deterministic_research_answer = ""
+                    ans = deterministic_research_answer or msg.content or "Task completed."
                 task_trace["success"] = bool(task_trace.get("tool_calls"))
                 task_trace["final_answer"] = ans
                 await self.ctx.add_history(session_id, "assistant", ans)
@@ -3353,6 +3892,8 @@ if FASTAPI_AVAILABLE:
             self.agent_startup_error = None
             self.chat_lock = asyncio.Lock()
             self.evolution_store = EvolutionStore(BASE_DIR.parent)
+            self.bound_host = "0.0.0.0"
+            self.bound_port = 8000
             self.app = FastAPI(title="Agent HTTP API", lifespan=self.lifespan)
             self.app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
             self.app.post("/chat")(self.chat_endpoint)
@@ -3370,10 +3911,31 @@ if FASTAPI_AVAILABLE:
             self.app.post("/memory/update")(self.update_memory_record_endpoint)
             self.app.post("/memory/delete")(self.delete_memory_record_endpoint)
             self.app.post("/memory/clear")(self.clear_memory_endpoint)
+            self.app.get("/memory/ontology")(self.get_memory_ontology_endpoint)
+            self.app.get("/memory/hypergraph")(self.get_memory_hypergraph_endpoint)
+            # Graph traversal endpoints (Neo4j-powered)
+            self.app.get("/graph/citation_path")(self.graph_citation_path_endpoint)
+            self.app.get("/graph/cited_by_chain")(self.graph_cited_by_chain_endpoint)
+            self.app.get("/graph/coauthor_network")(self.graph_coauthor_network_endpoint)
+            self.app.get("/graph/influential")(self.graph_influential_endpoint)
+            self.app.get("/graph/research_gaps")(self.graph_research_gaps_endpoint)
+            self.app.get("/graph/community")(self.graph_community_endpoint)
+            # Engine status
+            self.app.get("/engines/status")(self.engines_status_endpoint)
             self.app.post("/conversations/clear")(self.clear_conversations_endpoint)
+            self.app.get("/skills/list")(self.list_skills_endpoint)
+            self.app.get("/skills/read")(self.read_skill_file_endpoint)
+            self.app.post("/skills/write")(self.write_skill_file_endpoint)
+            self.app.post("/skills/rollback")(self.rollback_skill_file_endpoint)
             self.app.get("/check_confirmation")(self.check_confirmation_endpoint)
             self.app.post("/submit_confirmation")(self.submit_confirmation_endpoint)
             self.app.add_api_websocket_route("/ws/agent-events", self.agent_events_ws)
+            # Decision tracker endpoints
+            self.app.post("/decisions/record")(self.record_decision_endpoint)
+            self.app.post("/decisions/conflicts")(self.detect_conflicts_endpoint)
+            self.app.get("/decisions/list")(self.list_decisions_endpoint)
+            self.app.get("/decisions/stats")(self.decisions_stats_endpoint)
+            self.app.delete("/decisions/delete")(self.delete_decision_endpoint)
 
         async def agent_events_ws(self, websocket: WebSocket):
             await websocket.accept()
@@ -3405,12 +3967,41 @@ if FASTAPI_AVAILABLE:
                 except Exception:
                     self.active_ws_connections.discard(ws)
 
+        def _write_runtime_files(self):
+            runtime_dir = BASE_DIR.parent / ".runtime"
+            try:
+                runtime_dir.mkdir(exist_ok=True)
+                (runtime_dir / "backend_port.txt").write_text(str(self.bound_port), encoding="utf-8")
+                (runtime_dir / "backend_pid.txt").write_text(str(os.getpid()), encoding="utf-8")
+                (runtime_dir / "backend_host.txt").write_text(str(self.bound_host), encoding="utf-8")
+            except OSError as exc:
+                logger.warning(f"Could not write backend runtime metadata: {exc}")
+
+        def _clear_runtime_pid_file(self):
+            pid_file = BASE_DIR.parent / ".runtime" / "backend_pid.txt"
+            try:
+                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                    pid_file.unlink()
+            except OSError as exc:
+                logger.warning(f"Could not clear backend pid metadata: {exc}")
+
         @asynccontextmanager
         async def lifespan(self, app: FastAPI):
+            self._write_runtime_files()
+            self.decision_tracker: DecisionTracker | None = None
             try:
                 self.agent = await self.agent_factory()
                 self.agent.broadcast_event = self.broadcast_agent_event
                 self.agent_startup_error = None
+                # Initialize decision tracker (hypergraph-backed)
+                if self.agent:
+                    try:
+                        db = self.agent.memory_engine.db
+                        if db and getattr(db, 'pg_pool', None) and getattr(db, 'service', None):
+                            self.decision_tracker = DecisionTracker(db)
+                            logger.info("Decision tracker initialized (hypergraph-backed)")
+                    except Exception as e:
+                        logger.warning(f"Decision tracker not available: {e}")
             except Exception as exc:
                 self.agent = None
                 self.agent_startup_error = f"{exc.__class__.__name__}: {exc}"
@@ -3418,6 +4009,7 @@ if FASTAPI_AVAILABLE:
             yield
             if self.agent:
                 await self.agent.close()
+            self._clear_runtime_pid_file()
 
         async def runtime_status_endpoint(self, request: Request):
             started = time.perf_counter()
@@ -3876,6 +4468,202 @@ if FASTAPI_AVAILABLE:
             deleted = await self._delete_redis_patterns(self.agent.ctx.redis, patterns)
             return {"status": "success", "deleted": deleted, "session_id": session_id or None}
 
+        async def get_memory_ontology_endpoint(self):
+            try:
+                from memory_ontology import default_memory_ontology
+                payload = default_memory_ontology()
+                payload["status"] = "success"
+                return payload
+            except Exception as exc:
+                logger.warning(f"Memory ontology endpoint failed: {exc}", exc_info=True)
+                return {"status": "error", "message": str(exc), "node_types": [], "relation_types": []}
+
+        # ── Graph traversal endpoints (Neo4j + Redis cache) ──
+
+        async def graph_citation_path_endpoint(self, from_id: str = "", to_id: str = "", max_depth: int = 5):
+            if not from_id or not to_id:
+                return {"error": "Missing from_id or to_id"}
+            svc = self._memory_service()
+            return await svc.graph_citation_path(from_id, to_id, max_depth) if svc else {"error": "Memory unavailable"}
+
+        async def graph_cited_by_chain_endpoint(self, paper_id: str = "", depth: int = 2):
+            if not paper_id:
+                return {"error": "Missing paper_id"}
+            svc = self._memory_service()
+            return await svc.graph_cited_by_chain(paper_id, depth) if svc else {"error": "Memory unavailable"}
+
+        async def graph_coauthor_network_endpoint(self, author: str = "", depth: int = 2):
+            if not author:
+                return {"error": "Missing author name"}
+            svc = self._memory_service()
+            return await svc.graph_coauthor_network(author, depth) if svc else {"error": "Memory unavailable"}
+
+        async def graph_influential_endpoint(self, topic: str = "", limit: int = 10):
+            svc = self._memory_service()
+            return await svc.graph_influential_papers(topic, limit) if svc else []
+
+        async def graph_research_gaps_endpoint(self, keyword: str = "", limit: int = 10):
+            svc = self._memory_service()
+            return await svc.graph_research_gaps(keyword, limit) if svc else []
+
+        async def graph_community_endpoint(self, label: str = "Paper"):
+            db = self._memory_db()
+            if db and getattr(db, 'graph_engine', None):
+                return await db.graph_engine.community_detect(label)
+            return {"error": "Graph engine unavailable"}
+
+        async def engines_status_endpoint(self):
+            db = self._memory_db()
+            return {
+                "postgres": "online" if db and db.pg_pool else "offline",
+                "redis": "online" if db and db.redis else "offline",
+                "neo4j": "online" if db and getattr(db, 'neo4j', None) else "offline",
+                "graph_engine": "online" if db and getattr(db, 'graph_engine', None) and db.graph_engine.is_available() else "offline",
+                "cache_engine": "online" if db and getattr(db, 'cache_engine', None) else "offline",
+            }
+
+        async def get_memory_hypergraph_endpoint(self, kind: str = "", limit: int = 200):
+            db = self._memory_db()
+            service = getattr(db, "service", None) if db else None
+            if not service:
+                return {
+                    "status": "degraded",
+                    "message": self.agent_startup_error or "memory database unavailable",
+                    "nodes": [],
+                    "edges": [],
+                    "hyperedges": [],
+                }
+            try:
+                safe_limit = max(1, min(int(limit or 200), 500))
+                if kind:
+                    nodes = await service.query_ontology_nodes(kind=kind, limit=safe_limit)
+                    return {"status": "success", "nodes": nodes, "edges": [], "hyperedges": []}
+                payload = await service.query_hypergraph(limit_nodes=safe_limit, limit_edges=min(safe_limit, 200))
+                payload["status"] = "success"
+                return payload
+            except Exception as exc:
+                logger.warning(f"Memory hypergraph endpoint failed: {exc}", exc_info=True)
+                return {"status": "error", "message": str(exc), "nodes": [], "edges": [], "hyperedges": []}
+
+        def _skill_root(self) -> Path:
+            return (BASE_DIR / "skills").resolve()
+
+        def _skill_rollback_file(self) -> Path:
+            runtime_dir = BASE_DIR.parent / ".runtime"
+            runtime_dir.mkdir(exist_ok=True)
+            return runtime_dir / "skill_rollbacks.json"
+
+        def _resolve_skill_file(self, relative_path: str, *, require_existing: bool = True) -> Path:
+            rel = str(relative_path or "").strip().replace("\\", "/")
+            if not rel:
+                raise ValueError("Missing path.")
+            root = self._skill_root()
+            target = (root / rel).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("Path traversal denied.") from exc
+            allowed_suffixes = {".md", ".py", ".toml", ".json", ".yaml", ".yml"}
+            if target.suffix.lower() not in allowed_suffixes:
+                raise ValueError("Unsupported skill file type.")
+            if require_existing and not target.is_file():
+                raise ValueError("Skill file not found.")
+            return target
+
+        async def list_skills_endpoint(self):
+            skills_root = self._skill_root()
+            result = []
+            try:
+                if skills_root.is_dir():
+                    for md_path in sorted(skills_root.rglob("SKILL.md")):
+                        rel_dir = md_path.parent.relative_to(skills_root)
+                        files = []
+                        for item in sorted(md_path.parent.rglob("*")):
+                            if item.is_file() and item.suffix.lower() in {".md", ".py", ".toml", ".json", ".yaml", ".yml"}:
+                                files.append({
+                                    "name": item.name,
+                                    "path": item.relative_to(skills_root).as_posix(),
+                                })
+                        result.append({
+                            "name": rel_dir.as_posix() or md_path.parent.name,
+                            "path": rel_dir.as_posix(),
+                            "files": files,
+                        })
+                return {"status": "success", "skills": result, "total": len(result)}
+            except Exception as exc:
+                logger.warning(f"Failed to list skills: {exc}", exc_info=True)
+                return {"status": "error", "message": str(exc), "skills": []}
+
+        async def read_skill_file_endpoint(self, path: str = ""):
+            try:
+                target = self._resolve_skill_file(path)
+                rel = target.relative_to(self._skill_root()).as_posix()
+                return {"status": "success", "path": rel, "content": target.read_text(encoding="utf-8", errors="replace")}
+            except Exception as exc:
+                logger.warning(f"Failed to read skill file {path}: {exc}")
+                return {"status": "error", "message": str(exc), "path": path}
+
+        async def write_skill_file_endpoint(self, request: Request):
+            data = await self._safe_request_json(request)
+            rel_path = str(data.get("path") or "").strip()
+            content = str(data.get("content") or "")
+            try:
+                target = self._resolve_skill_file(rel_path)
+                original = target.read_text(encoding="utf-8", errors="replace")
+                if original == content:
+                    return {"status": "success", "message": "No changes.", "snapshot": None}
+                snapshot = {
+                    "id": str(uuid.uuid4()),
+                    "skill_name": str(data.get("skill_name") or target.parent.name),
+                    "path": target.relative_to(self._skill_root()).as_posix(),
+                    "timestamp": time.time(),
+                    "original_content": original,
+                }
+                target.write_text(content, encoding="utf-8")
+                rollback_file = self._skill_rollback_file()
+                rollbacks = []
+                if rollback_file.is_file():
+                    try:
+                        loaded = json.loads(rollback_file.read_text(encoding="utf-8"))
+                        rollbacks = loaded if isinstance(loaded, list) else []
+                    except Exception:
+                        rollbacks = []
+                rollbacks.insert(0, snapshot)
+                rollback_file.write_text(json.dumps(rollbacks[:50], ensure_ascii=False, indent=2), encoding="utf-8")
+                return {"status": "success", "snapshot": snapshot["id"], "message": "File written and rollback snapshot created."}
+            except Exception as exc:
+                logger.warning(f"Failed to write skill file {rel_path}: {exc}", exc_info=True)
+                return {"status": "error", "message": str(exc)}
+
+        async def rollback_skill_file_endpoint(self, request: Request):
+            data = await self._safe_request_json(request)
+            snapshot_id = str(data.get("snapshot_id") or "").strip()
+            rollback_file = self._skill_rollback_file()
+            if not rollback_file.is_file():
+                return {"status": "success", "rollbacks": [], "total": 0} if not snapshot_id else {"status": "error", "message": "No rollback file found."}
+            try:
+                loaded = json.loads(rollback_file.read_text(encoding="utf-8"))
+                rollbacks = loaded if isinstance(loaded, list) else []
+                if not snapshot_id:
+                    public_rollbacks = [{k: v for k, v in item.items() if k != "original_content"} for item in rollbacks]
+                    return {"status": "success", "rollbacks": public_rollbacks, "total": len(public_rollbacks)}
+                target_snapshot = None
+                remaining = []
+                for snapshot in rollbacks:
+                    if snapshot.get("id") == snapshot_id and target_snapshot is None:
+                        target_snapshot = snapshot
+                    else:
+                        remaining.append(snapshot)
+                if not target_snapshot:
+                    return {"status": "error", "message": f"Snapshot {snapshot_id} not found."}
+                target = self._resolve_skill_file(str(target_snapshot.get("path") or ""))
+                target.write_text(str(target_snapshot.get("original_content") or ""), encoding="utf-8")
+                rollback_file.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding="utf-8")
+                return {"status": "success", "message": f"Rolled back {target_snapshot.get('path')}."}
+            except Exception as exc:
+                logger.warning(f"Failed to rollback skill file: {exc}", exc_info=True)
+                return {"status": "error", "message": str(exc)}
+
         def _memory_db(self):
             if not self.agent:
                 return None
@@ -3993,8 +4781,17 @@ if FASTAPI_AVAILABLE:
                     "executed_tools": [],
                     "status": "degraded",
                 }
-            session_id = data.get("session_id", "default")
-            message = data.get("message", "")
+            session_id = str(data.get("session_id") or "default")
+            room_id = str(data.get("room_id") or "").strip()
+            user_id = str(data.get("user_id") or "shared").strip() or "shared"
+            user_name = str(data.get("user_name") or user_id).strip() or user_id
+            if room_id and (not session_id or session_id == "default"):
+                safe_room = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in room_id)[:120]
+                session_id = f"room_{safe_room or hashlib.sha256(room_id.encode('utf-8')).hexdigest()[:16]}"
+            message = str(data.get("message") or "")
+            agent_message = message
+            if user_name or user_id != "shared":
+                agent_message = f"[Group chat speaker: {user_name} | user_id: {user_id}]\n{message}"
             domain = data.get("domain", "auto")
             provider = data.get("provider")
             model = data.get("model")
@@ -4022,7 +4819,7 @@ if FASTAPI_AVAILABLE:
             async with self.chat_lock:
                 if provider or model:
                     self.agent.configure_llm(provider, model)
-                answer = await self.agent.chat(session_id, message, domain)
+                answer = await self.agent.chat(session_id, agent_message, domain)
             return {"answer": answer, "executed_tools": []}
 
         async def remote_delegate_endpoint(self, request: Request):
@@ -4108,7 +4905,122 @@ if FASTAPI_AVAILABLE:
             })
             return {"status": "success"}
 
+        # ── Decision tracker endpoints ─────────────────
+
+        async def _get_decision_tracker(self) -> DecisionTracker | None:
+            if self.decision_tracker:
+                return self.decision_tracker
+            # Lazy init: pass memory_db so DecisionTracker can use ontology + hypergraph
+            if self.agent:
+                try:
+                    db = self.agent.memory_engine.db
+                    if db and getattr(db, 'pg_pool', None) and getattr(db, 'service', None):
+                        self.decision_tracker = DecisionTracker(db)
+                        logger.info("DecisionTracker initialized (hypergraph-backed)")
+                        return self.decision_tracker
+                except Exception as e:
+                    logger.warning(f"DecisionTracker lazy init failed: {e}")
+            return None
+
+        async def record_decision_endpoint(self, request: Request):
+            try:
+                dt = await self._get_decision_tracker()
+                if not dt:
+                    return {"status": "error", "message": "Decision tracker unavailable — database not connected"}
+                data = await self._safe_request_json(request)
+                decision_id = await dt.record(
+                    session_id=str(data.get("session_id", "default")),
+                    owner_id=str(data.get("owner_id", "shared")),
+                    owner_name=str(data.get("owner_name", "")),
+                    topic=str(data.get("topic", "")),
+                    question=str(data.get("question", "")),
+                    chosen=str(data.get("chosen", "")),
+                    alternatives=data.get("alternatives", []),
+                    rationale=str(data.get("rationale", "")),
+                    tags=data.get("tags", []),
+                    scope=str(data.get("scope", "project")),
+                )
+                return {"status": "success", "decision_id": decision_id}
+            except Exception as exc:
+                logger.error(f"record_decision error: {exc}", exc_info=True)
+                return {"status": "error", "message": f"{exc.__class__.__name__}: {exc}"}
+
+        async def detect_conflicts_endpoint(self, request: Request):
+            dt = await self._get_decision_tracker()
+            if not dt:
+                return {"status": "degraded", "has_conflict": False, "conflicts": [], "message": "Decision tracker unavailable"}
+            data = await self._safe_request_json(request)
+            result = await dt.detect_conflict(
+                topic_hint=str(data.get("topic_hint", "")),
+                tags=data.get("tags", []),
+                current_owner_id=str(data.get("owner_id", "")),
+                scope=str(data.get("scope", "project")),
+            )
+            return {
+                "has_conflict": result.has_conflict,
+                "conflict_description": result.conflict_description,
+                "suggestion": result.suggestion,
+                "relevant_decisions": [
+                    {
+                        "id": d.id,
+                        "topic": d.topic,
+                        "question": d.question,
+                        "chosen": d.chosen,
+                        "owner_name": d.owner_name or d.owner_id,
+                        "owner_id": d.owner_id,
+                        "rationale": d.rationale,
+                        "created_at": d.created_at,
+                    }
+                    for d in result.prior_decisions
+                ],
+            }
+
+        async def list_decisions_endpoint(self, topic: str = "", owner_id: str = "", limit: int = 50, offset: int = 0):
+            dt = await self._get_decision_tracker()
+            if not dt:
+                return {"status": "degraded", "decisions": [], "total": 0, "message": "Decision tracker unavailable"}
+            records = await dt.list(topic=topic, owner_id=owner_id, limit=min(int(limit), 200), offset=int(offset))
+            return {
+                "decisions": [
+                    {
+                        "id": r.id,
+                        "session_id": r.session_id,
+                        "owner_name": r.owner_name or r.owner_id,
+                        "owner_id": r.owner_id,
+                        "topic": r.topic,
+                        "question": r.question,
+                        "chosen": r.chosen,
+                        "alternatives": r.alternatives,
+                        "rationale": r.rationale,
+                        "tags": r.tags,
+                        "scope": r.scope,
+                        "created_at": r.created_at,
+                    }
+                    for r in records
+                ],
+                "total": len(records),
+            }
+
+        async def decisions_stats_endpoint(self):
+            dt = await self._get_decision_tracker()
+            if not dt:
+                return {"status": "degraded", "message": "Decision tracker unavailable"}
+            return await dt.get_stats()
+
+        async def delete_decision_endpoint(self, request: Request):
+            dt = await self._get_decision_tracker()
+            if not dt:
+                return {"status": "error", "message": "Decision tracker unavailable"}
+            data = await self._safe_request_json(request)
+            decision_id = str(data.get("id") or "").strip()
+            if not decision_id:
+                return {"status": "error", "message": "Missing decision id"}
+            ok = await dt.delete(decision_id)
+            return {"status": "success" if ok else "not_found"}
+
         def run(self, host="0.0.0.0", port=8000):
+            self.bound_host = host
+            self.bound_port = port
             logger.info(f"Starting HTTP API on http://{host}:{port}")
             uvicorn.run(self.app, host=host, port=port)
 

@@ -26,6 +26,17 @@ def run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
 
 
+def run_probe(cmd: list[str], timeout: int = 8) -> subprocess.CompletedProcess | None:
+    try:
+        return run(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[WARN] Docker probe timed out after {timeout}s: {' '.join(cmd)}")
+        return None
+    except OSError as exc:
+        print(f"[WARN] Docker probe failed: {' '.join(cmd)} ({exc})")
+        return None
+
+
 def is_bindable(port: int) -> bool:
     for host in ("127.0.0.1", "0.0.0.0"):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -36,10 +47,11 @@ def is_bindable(port: int) -> bool:
     return True
 
 
-def find_bindable_port(preferred: int) -> int:
+def find_bindable_port(preferred: int, reserved: set[int] | None = None) -> int:
+    reserved = reserved or set()
     port = int(preferred)
     while port < 65535:
-        if is_bindable(port):
+        if port not in reserved and is_bindable(port):
             return port
         port += 1
     raise RuntimeError(f"No bindable port found from {preferred}")
@@ -55,9 +67,12 @@ def tcp_open(port: int, timeout: float = 1.0) -> bool:
 
 def try_docker_base_cmd() -> list[str] | None:
     candidates = [["docker"], ["docker", "--context", "desktop-linux"]]
+    probe_timeout = int(os.environ.get("MEGATRON_DOCKER_PROBE_TIMEOUT", "8"))
     for candidate in candidates:
-        for probe in (["info"], ["version"], ["ps"]):
-            result = run(candidate + probe, timeout=20)
+        for probe in (["version"], ["ps"], ["info"]):
+            result = run_probe(candidate + probe, timeout=probe_timeout)
+            if result is None:
+                continue
             if result.returncode == 0:
                 if len(candidate) > 1:
                     os.environ["DOCKER_CONTEXT"] = candidate[-1]
@@ -151,13 +166,16 @@ def choose_service_ports(docker_cmd: list[str], data: dict) -> dict[str, int]:
 
     ports: dict[str, int] = {}
     recreate: set[str] = set()
+    reserved_ports: set[int] = set()
     for name, spec in SERVICES.items():
         mapped = docker_port(docker_cmd, spec["container"], spec["container_port"])
         if mapped:
             ports[name] = mapped
+            reserved_ports.add(mapped)
             print(f"[OK] Reusing {name} port {mapped} from {spec['container']}.")
             continue
-        ports[name] = find_bindable_port(preferred[name])
+        ports[name] = find_bindable_port(preferred[name], reserved_ports)
+        reserved_ports.add(ports[name])
         if ports[name] != preferred[name]:
             print(f"[WARN] {name} port {preferred[name]} is unavailable; using {ports[name]}.")
         else:
@@ -286,6 +304,20 @@ def write_runtime_env(path: Path, ports: dict[str, int], backend_port: int | Non
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_ports_json(runtime_dir: Path, ports: dict[str, int], backend_port: int | None) -> None:
+    """Write .runtime/ports.json for cross-process service discovery."""
+    import json
+    payload = {
+        "postgres": ports.get("postgres", 54320),
+        "redis": ports.get("redis", 6379),
+        "neo4j_http": ports.get("neo4j_http", 7474),
+        "neo4j_bolt": ports.get("neo4j_bolt", 7687),
+    }
+    if backend_port is not None:
+        payload["backend"] = backend_port
+    (runtime_dir / "ports.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--toml", required=True)
@@ -326,6 +358,7 @@ def main() -> int:
         (runtime_dir / "backend_port.txt").write_text(str(backend_port) + "\n", encoding="utf-8")
 
     write_runtime_env(runtime_dir / "runtime_env.cmd", ports, backend_port)
+    write_ports_json(runtime_dir, ports, backend_port)
     print("[OK] Runtime setup complete.")
     return 0
 
