@@ -1,11 +1,16 @@
 ﻿---
 name: journal_matcher
-description: Match paper metadata (title, abstract, keywords, field) to recommended target journals and conferences, with impact factor, JCR/CAS quartile, review cycle, and acceptance rate.
+version: 1.1.0
+description: Match papers to target journals/conferences with impact factor, quartile, review cycle, acceptance rate, and upcoming submission deadlines.
 category: research
 entry_function: main
 parameters:
   type: object
   properties:
+    action:
+      type: string
+      description: "match | deadlines"
+      enum: ["match", "deadlines"]
     title:
       type: string
       description: Paper title.
@@ -19,31 +24,36 @@ parameters:
         type: string
     field:
       type: string
-      description: Research field to narrow matching scope.
+      description: Research field.
     top_k:
       type: integer
-      description: Number of top recommendations (default 5, max 15).
-    used_journals:
-      type: array
-      description: Already-published-in journal names to filter out.
-      items:
-        type: string
+      description: Number of top results (default 5).
     include_conferences:
       type: boolean
-      description: Whether to include top conferences (default true).
+      description: Include conferences (default true).
     online:
       type: boolean
-      description: Query OpenAlex for real-time impact factor and citation data (default true).
+      description: Query OpenAlex for real-time data (default true).
     lang:
       type: string
-      description: Output language, zh or en (default zh).
+      description: "Output language: zh | en"
+      enum: ["zh", "en"]
   required:
-    - title
-    - abstract
-keywords: [journal, conference, match, recommend, impact factor, quartile, submission, research]
+    - action
+keywords: [journal, conference, match, recommend, impact factor, quartile, submission, research, deadline, calendar]
 ---
 
-# Journal Matcher
+# Journal Matcher v1.1.0
 
-Recommends suitable target journals and conferences for a paper based on its title, abstract, keywords, and research field. Returns ranked results with impact factors, quartiles, typical review timelines, and acceptance rates.
+## Actions
+
+### `match`
+Original behavior — ranked journal/conference recommendations with impact factors, quartiles, review cycles, and acceptance rates.
+
+### `deadlines` ★ NEW
+Show upcoming submission deadlines for matched or specified journals:
+- Estimates next submission window based on typical cycles (monthly, quarterly, rolling, annual)
+- Shows: journal name, next estimated deadline, review cycle, acceptance rate, special issues if known
+- For conferences: shows the next occurrence based on typical annual/biennial schedule
+- Output: deadline calendar sorted by urgency
 

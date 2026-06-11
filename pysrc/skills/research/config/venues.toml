@@ -1,5 +1,17 @@
 strict_top_venue = true
 
+[policy]
+updated_at = "2026-06-08"
+mode = "realtime-first-with-versioned-fallback"
+computer_science_primary = "CCF Recommended International Academic Conferences and Journals, 2022 edition; CCF Chinese High-Quality Journals, 2025 edition where applicable"
+management_primary = "Financial Times 50 journals, UT Dallas 24 journals, and widely used ABS/AJG or ABDC journal quality signals where applicable"
+journal_partition_primary = "Live CAS/Fenqubiao and Clarivate JCR lookup when available"
+journal_partition_fallback = "Latest locally tagged CAS/JCR/CCF/FT50/UTD labels; unknown fields are not treated as proof"
+notes = [
+  "CAS partition service availability may change; never claim live CAS/JCR verification unless a live lookup succeeds.",
+  "Conference entries use CCF A/B/C style tiers where known; journal entries may carry CCF, CAS, JCR, FT50, UTD24, AJG, or ABDC metadata.",
+]
+
 [matching]
 prefixes = [
   "nature",
@@ -427,3 +439,634 @@ issn = ["1467-5463"]
 type = "journal"
 tier = "top"
 domain = ["biomedicine", "bioinformatics"]
+
+[[venues]]
+name = "Chinese Journal of Computers / è®¡ç®æºå­¦æ¥"
+aliases = ["chinese journal of computers", "计算机学报", "cjc"]
+type = "journal"
+tier = "top"
+domain = ["cs"]
+
+[[venues]]
+name = "Journal of Software / 软件学报"
+aliases = ["journal of software", "software journal", "软件学报"]
+type = "journal"
+tier = "top"
+domain = ["cs"]
+
+[[venues]]
+name = "Journal of Computer Research and Development / 计算机研究与发展"
+aliases = ["journal of computer research and development", "计算机研究与发展", "jcrd"]
+type = "journal"
+tier = "top"
+domain = ["cs"]
+
+[[venues]]
+name = "Acta Automatica Sinica / 自动化学报"
+aliases = ["acta automatica sinica", "自动化学报", "aas"]
+type = "journal"
+tier = "top"
+domain = ["ai", "cs"]
+
+[[venues]]
+name = "Science China: Information Sciences / 中国科学信息科学"
+aliases = ["science china information sciences", "中国科学信息科学", "scis"]
+type = "journal"
+tier = "top"
+domain = ["cs", "ai"]
+
+[[venues]]
+name = "Computer Science / 计算机科学"
+aliases = ["computer science", "计算机科学"]
+type = "journal"
+tier = "ccf-b"
+domain = ["cs"]
+
+[[venues]]
+name = "Pattern Recognition and Artificial Intelligence / 模式识别与人工智能"
+aliases = ["pattern recognition and artificial intelligence", "模式识别与人工智能", "prai"]
+type = "journal"
+tier = "ccf-b"
+domain = ["ai", "cs"]
+
+[[venues]]
+name = "Journal of Chinese Information Processing / 中文信息学报"
+aliases = ["journal of chinese information processing", "中文信息学报", "jcip"]
+type = "journal"
+tier = "ccf-b"
+domain = ["nlp", "ai"]
+
+[[venues]]
+name = "Management World / 管理世界"
+aliases = ["management world", "管理世界"]
+type = "journal"
+tier = "top"
+domain = ["management"]
+
+# Expanded computer-science whitelist. These records carry versioned standard
+# tags so downstream UI can explain why a venue matched.
+
+[[venues]]
+name = "ACM Transactions on Graphics"
+aliases = ["acm transactions on graphics", "tog", "siggraph"]
+issn = ["0730-0301"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "graphics"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "IEEE Transactions on Visualization and Computer Graphics"
+aliases = ["ieee transactions on visualization and computer graphics", "ieee tvcg", "tvcg", "visualization and computer graphics"]
+issn = ["1077-2626"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "graphics", "hci"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "IEEE/ACM Transactions on Networking"
+aliases = ["ieee/acm transactions on networking", "transactions on networking", "ton"]
+issn = ["1063-6692"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "networking"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "IEEE Transactions on Software Engineering"
+aliases = ["ieee transactions on software engineering", "tse"]
+issn = ["0098-5589"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "software"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "ACM Transactions on Software Engineering and Methodology"
+aliases = ["acm transactions on software engineering and methodology", "tosem"]
+issn = ["1049-331X"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "software"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "IEEE Transactions on Computers"
+aliases = ["ieee transactions on computers", "tc"]
+issn = ["0018-9340"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "architecture"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "IEEE Transactions on Parallel and Distributed Systems"
+aliases = ["ieee transactions on parallel and distributed systems", "tpds"]
+issn = ["1045-9219"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "systems"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "IEEE Transactions on Dependable and Secure Computing"
+aliases = ["ieee transactions on dependable and secure computing", "tdsc"]
+issn = ["1545-5971"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "security"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "ACM Transactions on Knowledge Discovery from Data"
+aliases = ["acm transactions on knowledge discovery from data", "tkdd"]
+issn = ["1556-4681"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "data", "ai"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "ACM Transactions on Information Systems"
+aliases = ["acm transactions on information systems", "tois"]
+issn = ["1046-8188"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "ir", "ai"]
+ccf = "A"
+jcr = "Q1"
+cas = "C1-fallback"
+source = "fallback: CCF-2022; CAS/JCR current lookup preferred"
+
+[[venues]]
+name = "ACM Transactions on Computer-Human Interaction"
+aliases = ["acm transactions on computer-human interaction", "acm transactions on computer human interaction", "tochi"]
+issn = ["1073-0516"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "hci"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies"
+aliases = ["proceedings of the acm on interactive mobile wearable and ubiquitous technologies", "imwut", "ubicomp"]
+issn = ["2474-9567"]
+type = "journal"
+tier = "ccf-a"
+domain = ["cs", "hci", "systems"]
+ccf = "A"
+jcr = "Q1"
+source = "fallback: CCF-2022; JCR current lookup preferred"
+
+[[venues]]
+name = "ISCA"
+aliases = ["isca", "international symposium on computer architecture"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "architecture"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "MICRO"
+aliases = ["micro", "international symposium on microarchitecture", "ieee/acm international symposium on microarchitecture"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "architecture"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "HPCA"
+aliases = ["hpca", "international symposium on high-performance computer architecture", "international symposium on high performance computer architecture"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "architecture"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "ASPLOS"
+aliases = ["asplos", "architectural support for programming languages and operating systems"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "architecture", "systems"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "SC"
+aliases = ["sc", "supercomputing", "international conference for high performance computing networking storage and analysis"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "systems"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "INFOCOM"
+aliases = ["infocom", "ieee infocom"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "networking"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "MobiCom"
+aliases = ["mobicom", "annual international conference on mobile computing and networking"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "networking", "systems"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "MobiSys"
+aliases = ["mobisys", "international conference on mobile systems applications and services"]
+type = "conference"
+tier = "ccf-b"
+domain = ["cs", "systems", "networking"]
+ccf = "B"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "SenSys"
+aliases = ["sensys", "conference on embedded networked sensor systems"]
+type = "conference"
+tier = "ccf-b"
+domain = ["cs", "systems", "networking"]
+ccf = "B"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "FAST"
+aliases = ["fast", "usenix conference on file and storage technologies"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "systems"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "USENIX ATC"
+aliases = ["usenix atc", "usenix annual technical conference"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "systems"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "ICSE"
+aliases = ["icse", "international conference on software engineering"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "software"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "FSE"
+aliases = ["fse", "esec/fse", "foundations of software engineering", "acm joint european software engineering conference and symposium on the foundations of software engineering"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "software"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "ASE"
+aliases = ["ase", "automated software engineering", "international conference on automated software engineering"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "software"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "ISSTA"
+aliases = ["issta", "international symposium on software testing and analysis"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "software"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "CAV"
+aliases = ["cav", "computer aided verification", "computer-aided verification"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "theory", "verification"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+[[venues]]
+name = "LICS"
+aliases = ["lics", "logic in computer science", "symposium on logic in computer science"]
+type = "conference"
+tier = "ccf-a"
+domain = ["cs", "theory"]
+ccf = "A"
+source = "fallback: CCF-2022"
+
+# Expanded management and business whitelist.
+
+[[venues]]
+name = "Administrative Science Quarterly"
+aliases = ["administrative science quarterly", "asq"]
+issn = ["0001-8392"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "organization"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Organization Science"
+aliases = ["organization science"]
+issn = ["1047-7039"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "organization"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Management Information Systems"
+aliases = ["journal of management information systems", "jmis"]
+issn = ["0742-1222"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "is"]
+ft50 = true
+utd24 = false
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Operations Management"
+aliases = ["journal of operations management", "jom"]
+issn = ["0272-6963"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "operations"]
+ft50 = true
+utd24 = true
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Production and Operations Management"
+aliases = ["production and operations management", "pom"]
+issn = ["1059-1478"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "operations"]
+ft50 = true
+utd24 = true
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Marketing Science"
+aliases = ["marketing science"]
+issn = ["0732-2399"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "marketing"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Marketing Research"
+aliases = ["journal of marketing research", "jmr"]
+issn = ["0022-2437"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "marketing"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Consumer Research"
+aliases = ["journal of consumer research", "jcr consumer"]
+issn = ["0093-5301"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "marketing"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Finance"
+aliases = ["journal of finance"]
+issn = ["0022-1082"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "finance"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Financial Economics"
+aliases = ["journal of financial economics", "jfe"]
+issn = ["0304-405X"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "finance"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Review of Financial Studies"
+aliases = ["review of financial studies", "rfs"]
+issn = ["0893-9454"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "finance"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "The Accounting Review"
+aliases = ["the accounting review", "accounting review", "tar"]
+issn = ["0001-4826"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "accounting"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of Accounting Research"
+aliases = ["journal of accounting research", "jar"]
+issn = ["0021-8456"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "accounting"]
+ft50 = true
+utd24 = true
+ajg = "4*"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Contemporary Accounting Research"
+aliases = ["contemporary accounting research", "car"]
+issn = ["0823-9150"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "accounting"]
+ft50 = true
+utd24 = true
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; UTD24; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Research Policy"
+aliases = ["research policy"]
+issn = ["0048-7333"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "innovation"]
+ft50 = true
+utd24 = false
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Journal of International Business Studies"
+aliases = ["journal of international business studies", "jibs"]
+issn = ["0047-2506"]
+type = "journal"
+tier = "flagship"
+domain = ["management", "international_business"]
+ft50 = true
+utd24 = false
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: FT50; AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Academy of Management Annals"
+aliases = ["academy of management annals"]
+issn = ["1941-6520"]
+type = "journal"
+tier = "flagship"
+domain = ["management"]
+ft50 = false
+utd24 = false
+ajg = "4"
+abdc = "A*"
+jcr = "Q1"
+source = "fallback: AJG/ABDC; JCR current lookup preferred"
+
+[[venues]]
+name = "Nankai Business Review"
+aliases = ["nankai business review", "nankai management review"]
+type = "journal"
+tier = "top"
+domain = ["management"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Chinese Journal of Management Science"
+aliases = ["chinese journal of management science"]
+type = "journal"
+tier = "top"
+domain = ["management", "operations"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Science Research Management"
+aliases = ["science research management"]
+type = "journal"
+tier = "top"
+domain = ["management", "innovation"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Systems Engineering - Theory and Practice"
+aliases = ["systems engineering theory and practice", "systems engineering - theory and practice"]
+type = "journal"
+tier = "top"
+domain = ["management", "systems"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal of Management Science / 管理科学学报"
+aliases = ["journal of management science", "管理科学学报"]
+type = "journal"
+tier = "top"
+domain = ["management"]

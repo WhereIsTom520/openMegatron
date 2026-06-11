@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import json as _json
 import sys
 from collections import defaultdict, Counter
@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from research_common import (
     emit, fail, openalex_fetch_work, openalex_id_from_paper,
     openalex_work_to_paper, papers_from_params, parse_params,
+    readings_to_papers,
     search_openalex, keyword_set, normalize_paper,
 )
 
@@ -160,8 +161,19 @@ def main() -> int:
         papers = search_openalex(str(params["query"]), limit=int(params.get("limit", 30)))
         include_references = True
         depth = 1
+    elif action == "author_network":
+        papers = papers_from_params(params)
+        if not papers and params.get("query"):
+            papers = search_openalex(str(params["query"]), limit=int(params.get("limit", 30)))
+        if not papers:
+            fail("Provide papers or query for author_network.")
+        net = _build_author_network(papers)
+        emit({"status": "success", "completed": True, "author_network": net})
+        return 0
     else:
         papers = papers_from_params(params)
+        if not papers and params.get("readings"):
+            papers = readings_to_papers(params.get("readings"))
         if not papers and params.get("query"):
             papers = search_openalex(str(params["query"]), limit=int(params.get("limit", 20)))
 
@@ -174,5 +186,72 @@ def main() -> int:
     return 0
 
 
+def _build_author_network(papers: list) -> dict:
+    """Build co-authorship network from a list of papers."""
+    from collections import defaultdict
+    coauthors = defaultdict(set)
+    author_papers = defaultdict(list)
+    author_venues = defaultdict(set)
+
+    for i, p in enumerate(papers):
+        authors = [a.strip() for a in str(p.get("authors", "")).split(";") if a.strip()]
+        title = p.get("title", f"Paper {i+1}")[:100]
+        venue = p.get("venue", "")
+        for a in authors:
+            author_papers[a].append(title)
+            if venue:
+                author_venues[a].add(venue)
+        for a in authors:
+            for b in authors:
+                if a < b:
+                    coauthors[a].add(b)
+                    coauthors[b].add(a)
+
+    # Top authors by paper count
+    top_authors = sorted(author_papers.items(), key=lambda x: -len(x[1]))[:20]
+    # Top co-author pairs by collaboration count
+    edge_counts = defaultdict(int)
+    for a, collabs in coauthors.items():
+        for b in collabs:
+            if a < b:
+                edge_counts[(a, b)] += 1
+    top_edges = sorted(edge_counts.items(), key=lambda x: -x[1])[:20]
+
+    return {
+        "total_authors": len(author_papers),
+        "total_coauthor_edges": len(edge_counts),
+        "top_authors": [{"name": a, "papers": len(ps), "venues": sorted(author_venues.get(a, set())),
+                         "sample_papers": ps[:3]} for a, ps in top_authors],
+        "top_collaborations": [{"author_a": a, "author_b": b, "joint_papers": n} for (a, b), n in top_edges],
+        "components": _network_components(coauthors, author_papers),
+    }
+
+
+def _network_components(coauthors: dict, author_papers: dict) -> list:
+    """Find connected components (research groups) in the co-authorship network."""
+    visited = set()
+    components = []
+    all_authors = set(coauthors.keys()) | set(author_papers.keys())
+    for author in all_authors:
+        if author in visited:
+            continue
+        stack = [author]
+        comp = set()
+        while stack:
+            a = stack.pop()
+            if a in visited:
+                continue
+            visited.add(a)
+            comp.add(a)
+            for neighbor in coauthors.get(a, set()):
+                if neighbor not in visited:
+                    stack.append(neighbor)
+        if len(comp) >= 2:
+            components.append({"size": len(comp), "members": sorted(comp)[:10], "total_papers": sum(len(author_papers.get(m, [])) for m in comp)})
+    components.sort(key=lambda c: -c["size"])
+    return components[:10]
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+

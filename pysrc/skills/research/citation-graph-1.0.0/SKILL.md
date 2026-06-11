@@ -8,7 +8,8 @@ parameters:
   properties:
     action:
       type: string
-      description: One of build (from papers), query (from OpenAlex topic), expand (single paper + depth), analyze (full topic analysis).
+      description: "build | query | expand | analyze | author_network"
+      enum: ["build", "query", "expand", "analyze", "author_network"]
     query:
       type: string
       description: Topic query for OpenAlex search.
@@ -21,6 +22,12 @@ parameters:
     depth:
       type: integer
       description: Reference expansion depth (0=no expansion, 1=direct refs, 2=refs-of-refs). Default 1.
+    readings:
+      type: array
+      description: Structured reading list from paper_reader. Automatically converted to papers for graph building.
+readings:
+      type: array
+      description: Structured reading list from paper_reader. Automatically converted to papers for graph building.
     max_nodes:
       type: integer
       description: Maximum nodes in the graph (default 50).
@@ -45,3 +52,5 @@ Enhanced citation graph builder with:
 - **Venue distribution**: Top venues ranked by paper count
 - **Mermaid output**: Ready-to-render graph visualization
 - **Three modes**: `query` (search topic), `expand` (explore one paper's network), `analyze` (full depth analysis)
+
+

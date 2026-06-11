@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -30,12 +30,19 @@ except ImportError:  # pragma: no cover
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from research_common import (  # noqa: E402
+    build_paper_links,
+    build_reference_verification,
+    build_verification_matrix,
     compact_text,
+    format_reference_list,
+    format_verification_section,
     is_top_venue_configured,
     match_top_venue,
     reconstruct_openalex_abstract,
     venue_policy_summary,
     venue_score,
+    venue_standard_source,
+    venue_standard_tags,
 )
 
 for _stream in (sys.stdout, sys.stderr):
@@ -179,7 +186,14 @@ def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def infer_effective_domain(query: str, requested_domain: Any = None) -> str | None:
+def infer_effective_domain(query: str, requested_domain: Any = None) -> str | list[str] | None:
+    if isinstance(requested_domain, list) and len(requested_domain) > 0:
+        normalized = []
+        for d in requested_domain:
+            nd = _normalized_domain_value(d)
+            if nd:
+                normalized.append(nd)
+        return normalized if normalized else None
     domain = _normalized_domain_value(requested_domain)
     if _contains_any(query, MANAGEMENT_MARKERS):
         return "management"
@@ -188,7 +202,7 @@ def infer_effective_domain(query: str, requested_domain: Any = None) -> str | No
     return domain
 
 
-def refine_query_for_domain(query: str, domain: str | None) -> str:
+def refine_query_for_domain(query: str, domain: str | list[str] | None) -> str:
     query = str(query or "").strip()
     lowered = query.lower()
     additions: list[str] = []
@@ -239,7 +253,7 @@ def clean_search_query(query: str) -> str:
     return value
 
 
-def build_query_variants(query: str, domain: str | None) -> list[str]:
+def build_query_variants(query: str, domain: str | list[str] | None) -> list[str]:
     cleaned = clean_search_query(query)
     variants: list[str] = []
     for item in [cleaned, refine_query_for_domain(cleaned, domain)]:
@@ -365,6 +379,7 @@ async def search_papers_openalex_variants(
             if not key or key in seen:
                 continue
             seen.add(key)
+            paper["search_source_query"] = query
             combined.append(paper)
     return combined
 
@@ -441,11 +456,13 @@ def openalex_item_to_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "venue": source.get("display_name") or "",
         "cited_by_count": item.get("cited_by_count") or 0,
         "doi": normalize_doi(item.get("doi") or ""),
+        "openalex_id": item.get("id") or "",
         "url": item.get("doi") or item.get("id") or "",
         "abstract": abstract or "",
         "source_id": source.get("id") or "",
         "issn_clean": re.sub(r"[^0-9Xx]", "", str(issn_val)).upper(),
         "primary_location": primary_loc,
+        "search_source_api": "OpenAlex",
     }
 
 
@@ -462,7 +479,16 @@ async def search_papers_openalex(session: aiohttp.ClientSession, query: str, lim
         return []
 
 
-def filter_papers(papers: list[dict[str, Any]], *, year_start: int | None = None, domain: str | None = None) -> list[dict[str, Any]]:
+def filter_papers(papers: list[dict[str, Any]], *, year_start: int | None = None,
+                  domain: str | list[str] | None = None, venues: list[str] | None = None,
+                  venue_mode: str = "strict") -> list[dict[str, Any]]:
+    """Filter papers by year and venue policy.
+
+    venue_mode:
+      - "strict":     Only top-tier venues (citation/verification use). Default.
+      - "inclusive":  ALL venues, but tag tier (gap/discovery use).
+      - "unfiltered": No venue filter at all (broad exploration).
+    """
     valid = []
     for paper in papers:
         if not is_plausible_paper(paper):
@@ -473,21 +499,37 @@ def filter_papers(papers: list[dict[str, Any]], *, year_start: int | None = None
         venue = str(paper.get("venue") or "")
         issn_clean = str(paper.get("issn_clean") or "")
         match = match_top_venue(venue, issn_clean, domain)
-        if not match or not is_top_venue_configured(venue, issn_clean, domain):
-            continue
+        is_top = is_top_venue_configured(venue, issn_clean, domain)
+
+        if venue_mode == "strict":
+            # Only top venues — for citation verification
+            if not match or not is_top:
+                continue
+        elif venue_mode == "inclusive":
+            # All venues, but tag the tier — for gap discovery
+            pass  # Keep the paper, tier info added below
+        # else "unfiltered" — keep everything
+
+        venue_tier = match.get("tier") if match else (
+            "unranked" if venue else "unknown"
+        )
         valid.append({
             "title": paper.get("title", ""),
             "year": str(pub_year),
             "authors": ", ".join(paper.get("authors") or []),
             "venue": venue,
-            "venue_policy_match": match.get("name") or venue,
-            "venue_tier": match.get("tier") or "",
+            "venue_policy_match": match.get("name") or venue if match else venue,
+            "venue_tier": venue_tier,
+            "venue_policy_source": venue_standard_source(match) if match else "unranked",
+            "venue_policy_tags": venue_standard_tags(match) if match else [],
             "citations": paper.get("cited_by_count", 0),
             "url": paper.get("url", ""),
             "abstract": paper.get("abstract", "") or "",
             "doi": paper.get("doi", ""),
+            "openalex_id": paper.get("openalex_id", ""),
             "source_id": paper.get("source_id", ""),
             "issn_clean": issn_clean,
+            "search_source_api": paper.get("search_source_api", ""),
         })
     return valid
 
@@ -728,6 +770,8 @@ async def fetch_top_papers_and_review(
     top_n: int | None = None,
     generate_review: bool = False,
     domain: str | None = None,
+    domains: list[str] | None = None,
+    venues: list[str] | None = None,
     fill_abstracts: bool = True,
     abstract_limit: int = 8,
 ) -> str:
@@ -736,7 +780,8 @@ async def fetch_top_papers_and_review(
     effective_query = query_variants[0] if query_variants else clean_search_query(query)
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         papers_list = await search_papers_openalex_variants(session, query_variants or [effective_query], limit=limit)
-        filtered = filter_papers(papers_list, year_start=year, domain=effective_domain)
+        venue_mode = str(params.get("venue_mode") or "strict")
+        filtered = filter_papers(papers_list, year_start=year, domain=effective_domain, venue_mode=venue_mode)
         filtered = filter_by_relevance(filtered, query)
         source_scores = await fetch_sources_scores(session, [p.get("source_id", "") for p in filtered])
 
@@ -761,9 +806,26 @@ async def fetch_top_papers_and_review(
         if fill_abstracts:
             await fill_missing_abstracts(session, filtered, max_count=max(0, abstract_limit))
 
-    for paper in filtered:
+    for idx, paper in enumerate(filtered, start=1):
+        verification_entry = build_reference_verification(paper, idx)
+        links_info = verification_entry.get("links_info", {})
+        paper["reference_verification"] = verification_entry
+        paper["links"] = links_info.get("links", {})
+        paper["hallucination_risk"] = verification_entry.get("hallucination_risk")
         paper.pop("source_id", None)
         paper.pop("issn_clean", None)
+
+    verification_matrix = build_verification_matrix(filtered)
+    reference_verification = {
+        "verdict": "metadata_verified" if filtered else "no_papers",
+        "paper_count": len(filtered),
+        "traceable_count": sum(1 for item in verification_matrix if item.get("verdict") == "traceable"),
+        "low_risk_count": sum(1 for item in verification_matrix if item.get("hallucination_risk") == "low"),
+        "medium_risk_count": sum(1 for item in verification_matrix if item.get("hallucination_risk") == "medium"),
+        "high_risk_count": sum(1 for item in verification_matrix if item.get("hallucination_risk") == "high"),
+        "needs_confirmation_count": sum(1 for item in verification_matrix if item.get("hallucination_risk") == "high"),
+        "boundary": "Metadata, DOI/OpenAlex, and fallback search links are provided. Publisher pages and PDF-level claims still require manual/full-text verification.",
+    }
 
     result: dict[str, Any] = {
         "status": "success",
@@ -778,13 +840,19 @@ async def fetch_top_papers_and_review(
         "total_fetched": len(papers_list),
         "valid_count": len(filtered),
         "papers": filtered,
+        "references": format_reference_list(filtered),
+        "verification_matrix": verification_matrix,
+        "reference_verification": reference_verification,
     }
     if generate_review:
         if not filtered:
             result["review"] = "No valid top-venue papers found to generate a review."
         else:
             try:
-                result["review"] = await asyncio.to_thread(generate_review_sync, filtered, query)
+                review = await asyncio.to_thread(generate_review_sync, filtered, query)
+                if "引用与反幻觉验证矩阵" not in review and "Citation & Anti-Hallucination Verification" not in review:
+                    review = review.rstrip() + "\n" + format_verification_section(filtered)
+                result["review"] = review
             except Exception as exc:
                 result["review"] = f"Review generation failed: {exc}"
     return json.dumps(result, ensure_ascii=False, indent=2)
@@ -839,3 +907,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
