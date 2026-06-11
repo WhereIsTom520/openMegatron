@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import subprocess
 import socket
 import time
@@ -153,7 +154,7 @@ def load_toml(path: Path) -> dict:
         return tomllib.load(file)
 
 
-def choose_service_ports(docker_cmd: list[str], data: dict) -> dict[str, int]:
+def choose_service_ports(docker_cmd: list[str], data: dict, blocked_ports: set[int] | None = None) -> dict[str, int]:
     postgres_cfg = data.get("postgres") or data.get("postgresql") or data.get("pgvector") or {}
     redis_cfg = data.get("redis") or {}
     neo4j_cfg = data.get("neo4j") or {}
@@ -166,7 +167,7 @@ def choose_service_ports(docker_cmd: list[str], data: dict) -> dict[str, int]:
 
     ports: dict[str, int] = {}
     recreate: set[str] = set()
-    reserved_ports: set[int] = set()
+    reserved_ports: set[int] = set(blocked_ports or set())
     for name, spec in SERVICES.items():
         mapped = docker_port(docker_cmd, spec["container"], spec["container_port"])
         if mapped:
@@ -188,6 +189,41 @@ def choose_service_ports(docker_cmd: list[str], data: dict) -> dict[str, int]:
         remove_container(docker_cmd, container)
 
     return ports
+
+
+def allocated_ports_from_compose_error(text: str) -> set[int]:
+    ports: set[int] = set()
+    for match in re.finditer(r"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):(\d+)", text or ""):
+        ports.add(int(match.group(1)))
+    for match in re.finditer(r"port\s+(\d+)\s+is already allocated", text or "", re.IGNORECASE):
+        ports.add(int(match.group(1)))
+    return ports
+
+
+def compose_up_with_retry(compose: list[str], docker_cmd: list[str], toml_path: Path, data: dict, runtime_dir: Path, ports: dict[str, int]) -> dict[str, int]:
+    blocked_ports: set[int] = set()
+    for attempt in range(1, 3):
+        print("[INFO] Starting local database containers...")
+        result = run(compose + ["-f", "docker-compose.yml", "up", "-d"], timeout=180)
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        if result.stderr.strip():
+            print(result.stderr.strip())
+        if result.returncode == 0:
+            return ports
+        combined = f"{result.stdout}\n{result.stderr}"
+        newly_blocked = allocated_ports_from_compose_error(combined)
+        if attempt >= 2 or not newly_blocked:
+            raise RuntimeError("Docker Compose failed to start local services.")
+        blocked_ports.update(newly_blocked)
+        print(f"[WARN] Docker reported allocated port(s) {sorted(newly_blocked)}. Re-selecting service ports and retrying...")
+        for spec in SERVICES.values():
+            if container_exists(docker_cmd, spec["container"]):
+                remove_container(docker_cmd, spec["container"])
+        ports = choose_service_ports(docker_cmd, data, blocked_ports=blocked_ports)
+        update_model_toml(toml_path, data, ports)
+        write_compose(Path("docker-compose.yml"), ports)
+    raise RuntimeError("Docker Compose failed to start local services.")
 
 
 def update_model_toml(path: Path, data: dict, ports: dict[str, int]) -> None:
@@ -336,14 +372,7 @@ def main() -> int:
     update_model_toml(toml_path, data, ports)
     write_compose(Path("docker-compose.yml"), ports)
 
-    print("[INFO] Starting local database containers...")
-    result = run(compose + ["-f", "docker-compose.yml", "up", "-d"], timeout=180)
-    if result.stdout.strip():
-        print(result.stdout.strip())
-    if result.stderr.strip():
-        print(result.stderr.strip())
-    if result.returncode != 0:
-        raise RuntimeError("Docker Compose failed to start local services.")
+    ports = compose_up_with_retry(compose, docker_cmd, toml_path, data, runtime_dir, ports)
 
     wait_for_services(docker_cmd, ports)
 

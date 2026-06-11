@@ -1,7 +1,7 @@
 ---
 name: peer_review_simulator
-version: 1.0.0
-description: Simulate structured peer review for a draft paper — evaluate novelty, methodology, clarity, soundness, and produce actionable revision suggestions.
+version: 1.1.0
+description: Domain-aware structured peer review — evaluates novelty, methodology, soundness, clarity, related work, and reproducibility with field-specific checklists, red-flag detection, and actionable revision suggestions.
 category: research
 entry_function: main
 parameters:
@@ -16,7 +16,7 @@ parameters:
       description: Paper title.
     abstract:
       type: string
-      description: Paper abstract.
+      description: Paper abstract (required).
     draft:
       type: string
       description: Full paper text or path to draft file.
@@ -27,7 +27,8 @@ parameters:
       default: "journal"
     field:
       type: string
-      description: Research field for domain-specific checks.
+      description: "Research field override: ai_ml | nlp | systems | hci | security | theory. Auto-detected if not specified."
+      enum: ["ai_ml", "nlp", "systems", "hci", "security", "theory"]
     lang:
       type: string
       description: "Review output language: zh | en"
@@ -44,26 +45,45 @@ parameters:
 keywords: [peer review, review, simulate, evaluate, revision, improve, draft, feedback, accept, reject]
 ---
 
-# Peer Review Simulator v1.0.0
+# Peer Review Simulator v1.1.0
 
-Simulates a structured peer review for a draft paper before submission.
+Domain-aware structured peer review simulation. Detects the research field from title+abstract and applies field-specific evaluation criteria.
 
-## Review Dimensions
+## Supported Fields
 
-| Dimension | Checks |
-|-----------|--------|
-| **Novelty** | Is the contribution clearly stated? Compared to SOTA? |
-| **Methodology** | Is the method clearly described? Reproducible? Appropriate for the claims? |
-| **Soundness** | Are claims supported by evidence? Statistical rigor? Ablation studies? |
-| **Clarity** | Is the writing clear? Figures/tables well-labeled? Logical flow? |
-| **Related Work** | Are key references cited? Is positioning clear vs prior work? |
-| **Impact** | Would this paper influence the field? Practical or theoretical significance? |
+| Field | Key Checks |
+|-------|-----------|
+| **AI/ML** | Benchmark comparison, ablation, significance testing, hyperparameter sensitivity |
+| **NLP** | Human evaluation, LLM baselines, multi-dataset, prompt disclosure |
+| **Systems** | End-to-end benchmarks, resource metrics, scalability, fault tolerance |
+| **HCI** | User study design, sample size, demographics, qualitative analysis |
+| **Security** | Threat model, attack/defense evaluation, assumptions |
+| **Theory** | Formal statements, proofs, bound comparison, tightness |
+
+## Review Dimensions (1-5 scale)
+
+| Dimension | What it checks |
+|-----------|---------------|
+| **Novelty** | Clear gap statement? Contribution well-positioned? Compared to SOTA? |
+| **Methodology** | Field-specific required elements present? Any red flags? |
+| **Experiment** | Statistical tests? Ablation? Multiple datasets? Error bars? |
+| **Clarity** | Structured sections? Well-sized paragraphs? Logical flow? |
+| **Related Work** | Citation count? Recent references? Top-venue citations? |
+
+## Red Flag Detection
+
+Each field has specific red flags that automatically reduce scores and generate warnings:
+- AI/ML: single dataset, no baselines, <1% improvement without significance
+- NLP: only BLEU/ROUGE, no LLM comparison, prompts not disclosed
+- Systems: micro-benchmarks only, single-machine eval
+- HCI: n<12, single demographic, lab-only for real-world claims
+- Security: no threat model, weak baselines
 
 ## Output
 
-- Overall recommendation: Accept / Minor Revision / Major Revision / Reject
-- Score per dimension (1-5)
-- Strengths (what works well)
-- Weaknesses (what needs improvement)
-- Specific actionable suggestions
-- Missing references that should be cited
+- Overall recommendation with score
+- Per-dimension scores with detailed breakdown
+- Strengths and weaknesses with specific evidence
+- Actionable revision suggestions
+- Field-specific venue expectations
+- Natural-language summary for quick assessment

@@ -1,7 +1,7 @@
 ---
 name: paper_reader
 version: 1.1.0
-description: Read papers from files/DOI/URL/PDF, produce structured notes, generate summaries, and extract methodologies with dataset/benchmark identification.
+description: Read papers from files/DOI/URL/PDF, produce structured notes, generate summaries, and extract methodologies with dataset/benchmark identification. Supports OCR fallback for scanned PDFs.
 entry_function: main
 parameters:
   type: object
@@ -33,6 +33,10 @@ parameters:
       description: "Output language for summarize: en | zh | auto. Default auto."
       enum: ["en", "zh", "auto"]
       default: "auto"
+    ocr:
+      type: boolean
+      description: "Force OCR mode for PDFs. When true, skips PyPDF2 and goes directly to OCR (pytesseract + pdf2image). When false (default), tries PyPDF2 first and falls back to OCR automatically if the extracted text is too short (< 100 chars) or empty."
+      default: false
   required:
     - action
 keywords: [paper, read, pdf, full text, abstract, doi, research notes, summarize, methodology, dataset, benchmark]
@@ -40,10 +44,23 @@ keywords: [paper, read, pdf, full text, abstract, doi, research notes, summarize
 
 # Paper Reader v1.1.0
 
+## PDF OCR Fallback
+
+When reading a PDF file via the `path` parameter, the skill now includes automatic OCR fallback:
+
+1. **PyPDF2 first** (default): extracts text using PyPDF2. If the result has >= 100 characters, it is used directly.
+2. **OCR fallback**: if PyPDF2 produces too little text (< 100 chars) or is empty, the skill automatically falls back to OCR using `pytesseract` + `pdf2image`. Each page is rendered as an image at 300 DPI and processed through Tesseract OCR.
+3. **Force OCR**: set `"ocr": true` to skip PyPDF2 and go directly to OCR mode.
+4. **Graceful degradation**: if neither `pytesseract` nor `pdf2image` is installed, the skill reports this clearly and falls back to raw binary extraction.
+
+The response includes an `extraction` field reporting which method was used: `pypdf2`, `ocr`, `fallback_binary`, or `error`.
+
+**Dependencies for OCR:** `pip install pytesseract pdf2image` (and install Tesseract OCR engine on your system).
+
 ## Actions
 
 ### `read` / `read_many`
-Original behavior — produce structured research notes with method category, contribution type, limitations, gap hints, evidence strength.
+Original behavior — produce structured research notes with method category, contribution type, limitations, gap hints, evidence strength. When reading PDFs, the response now includes an `extraction` object reporting the text extraction method used.
 
 ### `summarize` ★ NEW
 Generate a structured summary of the paper:

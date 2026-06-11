@@ -316,7 +316,9 @@ def infer_findings(text: str) -> str:
 
 def infer_limitations(text: str) -> str:
     lowered = (text or "").lower()
-    hints = []
+    hints: list[str] = []
+
+    # ---- Phase 1: keyword-based hints (fast fallback, kept from original) ----
     if "hallucination" in lowered or "幻觉" in lowered:
         hints.append("requires hallucination detection and uncertainty control")
     if "privacy" in lowered or "clinical" in lowered or "biomedicine" in lowered or "隐私" in lowered:
@@ -327,7 +329,168 @@ def infer_limitations(text: str) -> str:
         hints.append("deployment risk rises in open-ended decision environments")
     if "memory" in lowered or "记忆" in lowered:
         hints.append("long-term consistency, update policy, and forgetting control need explicit evaluation")
-    return "; ".join(hints) if hints else "limitations are not explicit in the available abstract"
+
+    # ---- Phase 2: structured abstract analysis ----
+    # 2a. Sample size / dataset limitations
+    _analyze_sample_limitations(lowered, hints)
+
+    # 2b. Methodological constraints
+    _analyze_methodological_constraints(lowered, hints)
+
+    # 2c. Generalizability concerns
+    _analyze_generalizability(lowered, hints)
+
+    # 2d. Temporal limitations
+    _analyze_temporal_limitations(lowered, hints)
+
+    # ---- Deduplicate while preserving order ----
+    seen: set[str] = set()
+    unique: list[str] = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            unique.append(h)
+
+    return "; ".join(unique) if unique else "limitations are not explicit in the available abstract"
+
+
+# ---------------------------------------------------------------------------
+# Helper functions for structured limitation analysis
+# ---------------------------------------------------------------------------
+
+def _analyze_sample_limitations(lowered: str, hints: list[str]) -> None:
+    # Small sample size indicators
+    small_n_patterns = [
+        (r"\bn\s*[=<>]\s*\d{1,2}\b", "small sample size (n<100)"),
+        (r"\bn\s*=\s*\d{2,3}\b", "small sample size (n<100)"),
+        (r"\bonly\s+\d{1,3}\s+(participant|subject|sample|patient|instance|case)", "small sample size"),
+        (r"\b\d{1,3}\s+(participant|subject|sample|patient)s?\b", "small sample size"),
+        (r"\bfew[-\s]?shot\b", "few-shot evaluation only; small n concern"),
+        (r"\blimited\s+(sample|data|dataset|corpus)\b", "limited dataset size"),
+    ]
+    for pattern, hint in small_n_patterns:
+        if re.search(pattern, lowered):
+            hints.append(hint)
+            break  # one sample-size hint is enough
+
+    # Single dataset concern
+    if re.search(r"\b(single|one)\s+(dataset|corpus|benchmark|source)\b", lowered):
+        hints.append("single dataset evaluation only")
+    if re.search(r"\bonly\s+(test|evaluat|benchmark)(ed|ing)?\s+on\b", lowered):
+        hints.append("evaluated on a narrow set of benchmarks")
+
+    # Synthetic / simulated data
+    if re.search(r"\b(synthetic|simulated|artificial(ly)?\s+generated)\s+(data|dataset|corpus|text)\b", lowered):
+        hints.append("synthetic or simulated data; real-world validation needed")
+    if re.search(r"\bsimulation\s+(study|only|setting|environment)\b", lowered):
+        hints.append("simulation study; may not reflect real-world conditions")
+
+    # Imbalanced or noisy data
+    if re.search(r"\b(class\s*)?imbalance(d)?\b", lowered):
+        hints.append("class imbalance in dataset may bias results")
+    if re.search(r"\bnoisy\s+(label|data|annotation)\b", lowered):
+        hints.append("noisy labels or annotations may affect reliability")
+
+
+def _analyze_methodological_constraints(lowered: str, hints: list[str]) -> None:
+    # Correlation vs causation
+    if re.search(r"\bcorrelation(al)?\b", lowered) and not re.search(r"\bcaus(al|ation)\b", lowered):
+        hints.append("correlation-based analysis; causation not established")
+
+    # Lab vs field / real-world
+    if re.search(r"\b(lab(oratory)?\s+(setting|study|experiment|condition)|controlled\s+(lab|environment|setting))\b", lowered):
+        hints.append("lab setting may not transfer to production")
+    if re.search(r"\bin[-\s]vitro\b", lowered):
+        hints.append("in-vitro results; in-vivo validation pending")
+    if re.search(r"\b(offline|static)\s+(evaluation|setting|data)\b", lowered):
+        hints.append("offline/static evaluation; online performance unknown")
+
+    # Self-reported / survey-based
+    if re.search(r"\bself[-\s]report(ed|ing)?\b", lowered):
+        hints.append("self-reported data; subject to recall and social-desirability bias")
+    if re.search(r"\bquestionnaire\b", lowered) or re.search(r"\bsurvey\s+(data|response|participant)\b", lowered):
+        hints.append("survey-based data; response bias possible")
+
+    # Ablation / sensitivity gaps
+    if re.search(r"\bno\s+(ablation|sensitivity)\s+(study|analysis)\b", lowered):
+        hints.append("no ablation or sensitivity analysis reported")
+    if re.search(r"\bhyperparameter\b", lowered) and re.search(r"\b(tuned?|sensitive|choice|selection)\b", lowered):
+        hints.append("hyperparameter sensitivity not fully explored")
+
+    # Reproducibility flags
+    if re.search(r"\b(not\s+(reproducible|open[-\s]?source(d)?)|proprietary|closed[-\s]?source)\b", lowered):
+        hints.append("code or data not publicly available; reproducibility limited")
+    if re.search(r"\brandom\s+(seed|initialization)\b", lowered) and re.search(r"\b(single|fixed|one)\b", lowered):
+        hints.append("single random seed; variance across runs unreported")
+
+
+def _analyze_generalizability(lowered: str, hints: list[str]) -> None:
+    # Domain-specific
+    if re.search(r"\bdomain[-\s]specific\b", lowered):
+        hints.append("domain-specific; cross-domain transfer unclear")
+    if re.search(r"\b(specific\s+to\b|restricted\s+to\b|limited\s+to\b)\s+\w+\s+(domain|field|area|setting)", lowered):
+        hints.append("findings restricted to a specific domain")
+
+    # Language constraints
+    if re.search(r"\benglish[-\s](only|language|text|corpus|document|paper)", lowered):
+        hints.append("English-language papers only")
+    if re.search(r"\bmonolingual\b", lowered):
+        hints.append("monolingual evaluation; multilingual performance unknown")
+    if re.search(r"\b(only\s+english|english\s+only)\b", lowered):
+        hints.append("English-only evaluation")
+
+    # Geographic / cultural
+    if re.search(r"\b(single\s+(country|region|hospital|center|site|institution))\b", lowered):
+        hints.append("single-site study; geographic generalizability uncertain")
+    if re.search(r"\b(western|european|us[-\s]based|united\s+states|american)\b", lowered) and re.search(r"\b(sample|population|cohort|participant|data)\b", lowered):
+        hints.append("Western-centric sample; cross-cultural generalizability unclear")
+    if re.search(r"\bweibo\b|\bwechat\b|\bchinese\s+(social|language|text|corpus|dataset)\b", lowered):
+        hints.append("Chinese-language / platform-specific; cross-platform generalizability unclear")
+
+    # Model / architecture specific
+    if re.search(r"\b(single\s+(model|architecture|backbone|framework))\b", lowered):
+        hints.append("tested on a single architecture; model-agnostic claims unverified")
+    if re.search(r"\b(small[-\s]?(scale)?\s+model|lightweight)\b", lowered):
+        hints.append("small-scale model; findings may not hold for larger architectures")
+
+    # Task-specificity
+    if re.search(r"\b(single\s+task|task[-\s]specific)\b", lowered):
+        hints.append("single-task evaluation; multi-task robustness unknown")
+
+
+def _analyze_temporal_limitations(lowered: str, hints: list[str]) -> None:
+    # Rapidly evolving field
+    if re.search(r"\b(rapidly\s+(evolving|changing|advancing)|fast[-\s]moving|quickly\s+(evolving|changing))\s+(field|area|domain|landscape|technology)\b", lowered):
+        hints.append("rapidly evolving field; findings may become outdated quickly")
+
+    # Time-bound data
+    time_bound_patterns = [
+        (r"\b(19\d{2}|20[01]\d)\b", "data from a specific historical period; temporal drift possible"),
+        (r"\b(201[0-8]|200\d|199\d)\b", "data from a specific historical period; temporal drift possible"),
+        (r"\bdata\s+(from|collected|spanning|covering)\s+\d{4}\b", "data from a specific time window; temporal generalizability unclear"),
+    ]
+    for pattern, hint in time_bound_patterns:
+        if re.search(pattern, lowered):
+            hints.append(hint)
+            break
+
+    # Snapshot / cross-sectional
+    if re.search(r"\bcross[-\s]sectional\b", lowered):
+        hints.append("cross-sectional design; longitudinal trends not captured")
+    if re.search(r"\bsnapshot\b", lowered) and re.search(r"\b(data|study|analysis|evaluation)\b", lowered):
+        hints.append("snapshot study; temporal dynamics not assessed")
+
+    # Concept drift / staleness
+    if re.search(r"\bconcept\s+drift\b", lowered):
+        hints.append("concept drift acknowledged; model may degrade over time")
+    if re.search(r"\b(pre[-\s]trained?|training)\s+(cutoff|deadline|date)\b", lowered):
+        hints.append("training data cutoff may miss recent developments")
+
+    # Short duration
+    if re.search(r"\b(short[-\s]term|brief)\s+(study|follow[-\s]?up|experiment|evaluation|period)\b", lowered):
+        hints.append("short-term evaluation; long-term effects unmeasured")
+    if re.search(r"\b\d{1,2}[-\s](day|week|month)\s+(study|follow|experiment|period|window)\b", lowered):
+        hints.append("short observation window; long-term outcomes unknown")
 
 
 def infer_evidence_strength(paper: dict[str, Any]) -> str:

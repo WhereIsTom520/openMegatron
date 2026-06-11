@@ -1070,3 +1070,186 @@ aliases = ["journal of management science", "管理科学学报"]
 type = "journal"
 tier = "top"
 domain = ["management"]
+
+# Additional Chinese CS journals (CCF-B / CCF-C tier)
+[[venues]]
+name = "Journal of Chinese Computer Systems / 小型微型计算机系统"
+aliases = ["journal of chinese computer systems", "小型微型计算机系统"]
+issn = ["1000-1220"]
+type = "journal"
+tier = "ccf-b"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Application Research of Computers / 计算机应用研究"
+aliases = ["application research of computers", "计算机应用研究"]
+issn = ["1001-3695"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Computer Engineering / 计算机工程"
+aliases = ["computer engineering", "计算机工程"]
+issn = ["1000-3428"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal of Computer Applications / 计算机应用"
+aliases = ["journal of computer applications", "计算机应用"]
+issn = ["1001-3695"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Computer Engineering and Applications / 计算机工程与应用"
+aliases = ["computer engineering and applications", "计算机工程与应用"]
+issn = ["1002-8331"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Computer Engineering and Science / 计算机工程与科学"
+aliases = ["computer engineering and science", "计算机工程与科学"]
+issn = ["1007-130X"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Computer Engineering and Design / 计算机工程与设计"
+aliases = ["computer engineering and design", "计算机工程与设计"]
+issn = ["1000-7024"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Acta Electronica Sinica / 电子学报"
+aliases = ["acta electronica sinica", "电子学报"]
+issn = ["0372-2112"]
+type = "journal"
+tier = "top"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal on Communications / 通信学报"
+aliases = ["journal on communications", "通信学报"]
+issn = ["1000-436X"]
+type = "journal"
+tier = "top"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+# Additional Chinese management / economics journals
+[[venues]]
+name = "Management Review / 管理评论"
+aliases = ["management review", "管理评论"]
+issn = ["1003-1952"]
+type = "journal"
+tier = "top"
+domain = ["management"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal of Management Science (ISSN 1672-0334) / 管理科学"
+aliases = ["journal of management science", "管理科学"]
+issn = ["1672-0334"]
+type = "journal"
+tier = "top"
+domain = ["management"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Chinese Journal of Management / 管理学报"
+aliases = ["chinese journal of management", "管理学报"]
+issn = ["1672-884X"]
+type = "journal"
+tier = "top"
+domain = ["management"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal of Systems & Management / 系统管理学报"
+aliases = ["journal of systems and management", "journal of systems & management", "系统管理学报"]
+issn = ["1005-2542"]
+type = "journal"
+tier = "top"
+domain = ["management", "systems"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Economic Research Journal / 经济研究"
+aliases = ["economic research journal", "经济研究"]
+issn = ["0577-9154"]
+type = "journal"
+tier = "flagship"
+domain = ["economics"]
+source = "fallback: China economics top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "China Industrial Economics / 中国工业经济"
+aliases = ["china industrial economics", "中国工业经济"]
+issn = ["1006-480X"]
+type = "journal"
+tier = "top"
+domain = ["economics"]
+source = "fallback: China economics top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Accounting Research / 会计研究"
+aliases = ["accounting research", "会计研究"]
+issn = ["1003-2886"]
+type = "journal"
+tier = "top"
+domain = ["management", "accounting"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal of Financial Research / 金融研究"
+aliases = ["journal of financial research", "金融研究"]
+issn = ["1002-7246"]
+type = "journal"
+tier = "top"
+domain = ["management", "finance"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Studies in Science of Science / 科学学研究"
+aliases = ["studies in science of science", "科学学研究"]
+issn = ["1003-2053"]
+type = "journal"
+tier = "top"
+domain = ["management", "innovation"]
+source = "fallback: China management top-journal whitelist; live CN journal ranking lookup preferred"
+
+# Chinese AI-domain journals
+[[venues]]
+name = "CAAI Transactions on Intelligent Systems / 智能系统学报"
+aliases = ["caai transactions on intelligent systems", "智能系统学报"]
+issn = ["1673-4785"]
+type = "journal"
+tier = "ccf-b"
+domain = ["ai", "cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"
+
+[[venues]]
+name = "Journal of Data Acquisition and Processing / 数据采集与处理"
+aliases = ["journal of data acquisition and processing", "数据采集与处理"]
+issn = ["1004-9037"]
+type = "journal"
+tier = "ccf-c"
+domain = ["cs"]
+source = "fallback: China CS top-journal whitelist; live CN journal ranking lookup preferred"

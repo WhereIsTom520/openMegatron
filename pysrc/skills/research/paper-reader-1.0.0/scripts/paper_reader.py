@@ -18,6 +18,104 @@ try:
 except Exception:
     requests = None
 
+# ── OCR fallback imports ─────────────────────────────────
+_OCR_AVAILABLE = False
+_PDF2IMAGE_AVAILABLE = False
+try:
+    import pytesseract
+    _OCR_AVAILABLE = True
+except Exception:
+    pytesseract = None  # type: ignore[assignment]
+try:
+    from pdf2image import convert_from_path
+    _PDF2IMAGE_AVAILABLE = True
+except Exception:
+    convert_from_path = None  # type: ignore[assignment]
+
+_MIN_TEXT_LENGTH_FOR_OCR_FALLBACK = 100
+
+
+def extract_pdf_text_with_ocr(path: Path, *, max_chars: int = 12000, force_ocr: bool = False) -> dict:
+    """Extract text from a PDF with OCR fallback for scanned/image-based PDFs.
+
+    Strategy:
+      1. Try PyPDF2 (existing behavior from research_common.extract_pdf_text).
+      2. If the extracted text is too short (< 100 chars) or empty, fall back to OCR
+         using pytesseract + pdf2image.
+      3. If force_ocr is True, skip PyPDF2 and go directly to OCR.
+
+    Returns a dict with keys:
+      - text: the extracted text (str)
+      - method: 'pypdf2' | 'ocr' | 'fallback_binary'
+      - pages_processed: number of pages processed (OCR only)
+      - ocr_available: bool
+    """
+    if not path.exists():
+        return {"text": "", "method": "error", "pages_processed": 0,
+                "ocr_available": _OCR_AVAILABLE and _PDF2IMAGE_AVAILABLE,
+                "error": f"File not found: {path}"}
+
+    # 1. Try PyPDF2 first (unless force_ocr is set)
+    if not force_ocr:
+        pypdf2_text = extract_pdf_text(path, max_chars=max_chars)
+        if pypdf2_text and len(pypdf2_text.strip()) >= _MIN_TEXT_LENGTH_FOR_OCR_FALLBACK:
+            return {"text": pypdf2_text, "method": "pypdf2", "pages_processed": 0,
+                    "ocr_available": _OCR_AVAILABLE and _PDF2IMAGE_AVAILABLE}
+    else:
+        pypdf2_text = ""
+
+    # 2. OCR fallback
+    if _OCR_AVAILABLE and _PDF2IMAGE_AVAILABLE:
+        try:
+            images = convert_from_path(str(path), dpi=300)
+            ocr_chunks: list[str] = []
+            total_chars = 0
+            for image in images:
+                page_text = pytesseract.image_to_string(image, lang="eng")
+                ocr_chunks.append(page_text)
+                total_chars += len(page_text)
+                if total_chars >= max_chars:
+                    break
+            combined = "\n".join(ocr_chunks)
+            ocr_text = compact_text(combined, max_chars=max_chars)
+            if ocr_text.strip():
+                return {"text": ocr_text, "method": "ocr", "pages_processed": len(ocr_chunks),
+                        "ocr_available": True}
+        except Exception as exc:
+            return {"text": "", "method": "error", "pages_processed": 0,
+                    "ocr_available": True, "error": f"OCR processing failed: {exc}"}
+
+    # 3. Neither PyPDF2 nor OCR worked — return best available text with a clear message
+    if not _OCR_AVAILABLE and not _PDF2IMAGE_AVAILABLE:
+        note = ("OCR fallback is not available because pytesseract and/or pdf2image "
+                "are not installed. Install them with: pip install pytesseract pdf2image")
+    elif not _OCR_AVAILABLE:
+        note = "pytesseract is not installed. Install with: pip install pytesseract"
+    elif not _PDF2IMAGE_AVAILABLE:
+        note = "pdf2image is not installed. Install with: pip install pdf2image"
+    else:
+        note = "OCR produced no usable text."
+
+    if pypdf2_text.strip():
+        return {"text": pypdf2_text, "method": "pypdf2", "pages_processed": 0,
+                "ocr_available": _OCR_AVAILABLE and _PDF2IMAGE_AVAILABLE,
+                "ocr_note": note}
+    # Last resort: read raw bytes and try to extract any text
+    try:
+        data = path.read_bytes().decode("utf-8", errors="ignore")
+        data = re.sub(r"[^A-Za-z0-9一-鿿 .,;:!?()\[\]\-_/]+", " ", data)
+        raw_text = compact_text(data, max_chars=max_chars)
+        if raw_text.strip():
+            return {"text": raw_text, "method": "fallback_binary", "pages_processed": 0,
+                    "ocr_available": _OCR_AVAILABLE and _PDF2IMAGE_AVAILABLE,
+                    "ocr_note": note}
+    except Exception:
+        pass
+
+    return {"text": "", "method": "error", "pages_processed": 0,
+            "ocr_available": _OCR_AVAILABLE and _PDF2IMAGE_AVAILABLE,
+            "error": f"Could not extract text from PDF: {path}. {note}"}
+
 
 def build_summary(reading: dict) -> dict:
     """Build a lightweight paper summary from a reading dict."""
@@ -50,25 +148,40 @@ def _maybe_summarize(data: dict, action: str) -> dict:
     return data
 
 
-def read_file(path: Path, max_chars: int) -> dict:
+def read_file(path: Path, max_chars: int, *, force_ocr: bool = False) -> dict:
     if not path.exists():
         fail(f"File not found: {path}")
     suffix = path.suffix.lower()
+    extraction_method: str | None = None
+    ocr_pages: int = 0
     if suffix in (".txt", ".md", ".markdown", ".rst", ".bib", ".ris"):
         text = path.read_text(encoding="utf-8", errors="replace")
+        extraction_method = "text_file"
     elif suffix == ".json":
         value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         papers = normalize_papers(value)
         if papers:
             return {"status": "success", "completed": True, "readings": [reading_from_paper(p) for p in papers]}
         text = json.dumps(value, ensure_ascii=False)
+        extraction_method = "json"
     elif suffix == ".pdf":
-        text = extract_pdf_text(path, max_chars=max_chars)
+        ocr_result = extract_pdf_text_with_ocr(path, max_chars=max_chars, force_ocr=force_ocr)
+        text = ocr_result["text"]
+        extraction_method = ocr_result["method"]
+        ocr_pages = ocr_result.get("pages_processed", 0)
     else:
         text = path.read_text(encoding="utf-8", errors="replace")
+        extraction_method = "text_file"
     paper = normalize_paper({"title": path.stem, "text": compact_text(text, max_chars=max_chars)})
     paper["abstract"] = compact_text(text, max_chars=max_chars)
-    return {"status": "success", "completed": True, "reading": reading_from_paper(paper)}
+    result: dict = {"status": "success", "completed": True, "reading": reading_from_paper(paper),
+                     "extraction": {"method": extraction_method}}
+    if extraction_method == "ocr":
+        result["extraction"]["ocr_pages"] = ocr_pages
+    if extraction_method == "error":
+        result["status"] = "partial"
+        result["message"] = "Text extraction failed; reading may be incomplete."
+    return result
 
 
 def read_url(url: str, max_chars: int) -> dict:
@@ -246,6 +359,7 @@ def main() -> int:
     params = parse_params(sys.argv[1] if len(sys.argv) > 1 else "{}")
     action = str(params.get("action", "read")).lower()
     max_chars = int(params.get("max_chars") or 12000)
+    force_ocr = bool(params.get("ocr") or False)
 
     if action == "extract_methodology":
         papers = normalize_papers(params.get("papers") or [params.get("paper")] or [])
@@ -300,7 +414,7 @@ def main() -> int:
                                "readings": [reading_from_paper(p) for p in papers]}, action))
         return 0
     if params.get("path"):
-        emit(_maybe_summarize(read_file(Path(str(params["path"])).expanduser(), max_chars), action))
+        emit(_maybe_summarize(read_file(Path(str(params["path"])).expanduser(), max_chars, force_ocr=force_ocr), action))
         return 0
     if params.get("doi"):
         emit(_maybe_summarize(read_url(str(params["doi"]), max_chars), action))
