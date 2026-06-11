@@ -808,6 +808,7 @@ class YuanGeAgent:
         self.confirmation_state = ConfirmationStateTracker(self.ctx.redis, self._chat_turn_ttl_seconds, logger)
         self.conversation_flow = ConversationFlow()
         self.text_tool_call_parser = TextToolCallParser()
+        self._trajectory_collector = None  # Set by trajectory_collector.install_collector()
 
     def configure_llm(self, provider: str = None, model: str = None):
         provider_id = str(provider or self.llm_provider or self.config.get("llm_provider", "openai")).strip().lower()
@@ -3513,6 +3514,56 @@ class YuanGeAgent:
             "final_answer": "",
             "started_at": time.time()
         }
+
+        # ── Task blackboard: progress tracking for all agent tasks ──
+        from task_blackboard import TaskBlackboard, Step
+        blackboard_task_id = f"agent_{session_id}_{int(time.time())}"
+        blackboard = TaskBlackboard(blackboard_task_id, save_dir=".blackboard")
+        bb_steps = []
+        # Build blackboard steps from skill plan hint
+        if plan_hint and plan_hint != "Planner Signal: No special decomposition signal. Use the minimum necessary tool calls.":
+            # Parse the plan hint into concrete steps
+            hint_lower = plan_hint.lower()
+            if "decompose" in hint_lower or "small model" in hint_lower:
+                bb_steps.append(Step("understand", "理解任务目标", strategy="分析用户输入 + 历史上下文",
+                                     fallback_strategy="请求用户澄清"))
+                bb_steps.append(Step("plan", "制定执行计划", strategy="技能路由 + 工具选择",
+                                     fallback_strategy="手动分解子任务"))
+                bb_steps.append(Step("execute", "执行工具调用", strategy="LLM 驱动工具链",
+                                     fallback_strategy="简化工具调用"))
+                bb_steps.append(Step("verify", "验证结果", strategy="检查输出 + 错误处理",
+                                     fallback_strategy="报告原始输出"))
+            elif "direct" in hint_lower:
+                bb_steps.append(Step("execute", "直接执行任务", strategy="技能路由直接匹配",
+                                     fallback_strategy="通用对话模式"))
+            elif "transform" in hint_lower or "analyze" in hint_lower:
+                bb_steps.append(Step("acquire", "获取输入数据", strategy="输入提供技能",
+                                     fallback_strategy="请求用户提供"))
+                bb_steps.append(Step("transform", "处理/分析数据", strategy="转换/分析技能",
+                                     fallback_strategy="降级为简单处理"))
+                bb_steps.append(Step("deliver", "交付结果", strategy="格式化输出",
+                                     fallback_strategy="原始数据输出"))
+            else:
+                bb_steps.append(Step("execute", "执行任务", strategy=selected_skills.get(list(selected_skills.keys())[0], {}).get("description", "通用执行") if selected_skills else "通用执行",
+                                     fallback_strategy="通用对话"))
+        else:
+            bb_steps.append(Step("respond", "生成回复", strategy="LLM 直接回答",
+                                 fallback_strategy="模板化回复"))
+
+        # Add selected skill names as strategy context
+        for name in list(selected_skills.keys())[:3]:
+            if bb_steps:
+                bb_steps[-1].metadata.setdefault("skills", []).append(name)
+
+        blackboard.plan(bb_steps)
+        blackboard.start(bb_steps[0].id)
+        if self.broadcast_event:
+            await self.broadcast_event("blackboard_update", {
+                "session_id": session_id,
+                "blackboard": blackboard.to_dict(),
+                "report": blackboard.progress_report(),
+            })
+        task_trace["blackboard"] = blackboard
         allowed_paths_str = ", ".join(self.allowed_paths) if self.allowed_paths else "No restrictions (workspace only)"
         static_system = self._build_static_system_prompt(domain)
         # Adapt system prompt to model tier
@@ -3669,6 +3720,28 @@ class YuanGeAgent:
                         repeat_count = 0
                     if self.broadcast_event:
                         await self.broadcast_event("tool_start", {"name": tc.function.name, "arguments": tc.function.arguments, "session_id": session_id})
+                    # ── Blackboard: transition from plan → execute on first tool call ──
+                    if blackboard and blackboard._get("understand") and blackboard._get("understand").status.value == "in_progress":
+                        blackboard.complete("understand", summary="任务理解完成，开始执行")
+                        if blackboard._get("plan"):
+                            blackboard.start("plan")
+                            blackboard.complete("plan", summary=f"选定技能: {', '.join(list(selected_skills.keys())[:3])}")
+                        if blackboard._get("execute"):
+                            blackboard.start("execute")
+                        if self.broadcast_event:
+                            await self.broadcast_event("blackboard_update", {
+                                "session_id": session_id,
+                                "blackboard": blackboard.to_dict(),
+                            })
+                    elif blackboard and blackboard._get("acquire") and blackboard._get("acquire").status.value == "in_progress":
+                        blackboard.complete("acquire", summary="输入数据获取完成")
+                        if blackboard._get("transform"):
+                            blackboard.start("transform")
+                        if self.broadcast_event:
+                            await self.broadcast_event("blackboard_update", {
+                                "session_id": session_id,
+                                "blackboard": blackboard.to_dict(),
+                            })
                     ordered_tool_calls.append(tc)
                     tool_tasks.append(execute_one_tool_call(tc))
 
@@ -3747,6 +3820,8 @@ class YuanGeAgent:
                                         task_trace["success"] = False
                                         task_trace["final_answer"] = error_answer
                                         await self._learn_from_task_trace(task_trace)
+                                        if self._trajectory_collector:
+                                            await self._trajectory_collector.collect(task_trace)
                                         return error_answer
                                 else:
                                     skill_failures.pop(skill_name, None)
@@ -3784,15 +3859,36 @@ class YuanGeAgent:
                 task_trace["final_answer"] = ans
                 await self.ctx.add_history(session_id, "assistant", ans)
                 await self._learn_from_task_trace(task_trace)
+                if self._trajectory_collector:
+                    await self._trajectory_collector.collect(task_trace)
                 await self.dehydrator.process(session_id, f"User: {user_input}\nConsensus: {ans}")
+                # ── Blackboard: mark all remaining steps complete ──
+                for step in blackboard.steps:
+                    if step.status.value in ("pending", "in_progress"):
+                        blackboard.complete(step.id, summary="任务完成")
                 if self.broadcast_event:
+                    await self.broadcast_event("blackboard_update", {
+                        "session_id": session_id,
+                        "blackboard": blackboard.to_dict(),
+                        "report": blackboard.progress_report(),
+                    })
                     await self.broadcast_event("chat_end", {"session_id": session_id, "answer_preview": ans[:200]})
                 return ans
         timeout_answer = "Task took too long."
         task_trace["success"] = False
         task_trace["final_answer"] = timeout_answer
         await self._learn_from_task_trace(task_trace)
+        if self._trajectory_collector:
+            await self._trajectory_collector.collect(task_trace)
+        # ── Blackboard: mark current step failed on timeout ──
+        current = blackboard.current_step()
+        if current:
+            blackboard.fail(current.id, error="执行超时")
         if self.broadcast_event:
+            await self.broadcast_event("blackboard_update", {
+                "session_id": session_id,
+                "blackboard": blackboard.to_dict(),
+            })
             await self.broadcast_event("chat_end", {"session_id": session_id, "answer_preview": timeout_answer})
         return timeout_answer
 

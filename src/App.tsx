@@ -773,6 +773,7 @@ export default function App() {
   const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [evolutionManagerOpen, setEvolutionManagerOpen] = useState(false);
   const [dataActionMessage, setDataActionMessage] = useState('');
+  const [activeBlackboard, setActiveBlackboard] = useState<{steps: Array<{id:string;description:string;status:string;duration_ms:number;strategy:string;result_summary:string;retry_count:number;error:string}>;progress:{total:number;completed:number;failed:number;in_progress:number;pending:number;percent:number};report?:string} | null>(null);
 
   useEffect(() => {
     saveWorkspaceState(workspace);
@@ -878,6 +879,17 @@ export default function App() {
                   };
                 });
               }
+            }
+            if (type === 'blackboard_update') {
+              const bb = payload.data?.blackboard || payload.blackboard;
+              if (bb) {
+                setActiveBlackboard({
+                  steps: bb.steps || [],
+                  progress: bb.progress || { total: 0, completed: 0, failed: 0, in_progress: 0, pending: 0, percent: 0 },
+                  report: payload.data?.report || payload.report || '',
+                });
+              }
+              return;
             }
           } catch {
           }
