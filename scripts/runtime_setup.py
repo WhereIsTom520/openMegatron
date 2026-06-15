@@ -7,7 +7,37 @@ import time
 import urllib.request
 from pathlib import Path
 
-import tomli_w
+try:
+    import tomli_w
+except ModuleNotFoundError:
+    class _TomliWFallback:
+        @staticmethod
+        def dumps(data: dict) -> str:
+            lines = []
+
+            def write_table(prefix: str, table: dict):
+                if prefix:
+                    lines.append(f"[{prefix}]")
+                for key, value in table.items():
+                    if isinstance(value, dict):
+                        continue
+                    if isinstance(value, str):
+                        rendered = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+                    elif isinstance(value, bool):
+                        rendered = "true" if value else "false"
+                    else:
+                        rendered = str(value)
+                    lines.append(f"{key} = {rendered}")
+                for key, value in table.items():
+                    if isinstance(value, dict):
+                        if lines and lines[-1] != "":
+                            lines.append("")
+                        write_table(f"{prefix}.{key}" if prefix else key, value)
+
+            write_table("", data)
+            return "\n".join(lines) + "\n"
+
+    tomli_w = _TomliWFallback()
 
 try:
     import tomllib
@@ -304,7 +334,10 @@ def wait_for_services(docker_cmd: list[str], ports: dict[str, int]) -> None:
     neo4j_wait = int(os.environ.get("MEGATRON_NEO4J_WAIT_MAX", "90"))
     redis_wait = int(os.environ.get("MEGATRON_REDIS_WAIT_MAX", "45"))
 
-    wait_for(lambda: run(docker_cmd + ["exec", "megatron_postgres", "pg_isready", "-U", "root"], timeout=10).returncode == 0, "PostgreSQL", db_wait)
+    wait_for(lambda: run(docker_cmd + ["exec", "megatron_postgres", "pg_isready", "-U", "root"], timeout=10).returncode == 0, "PostgreSQL (container)", db_wait)
+    # Also verify the host port is actually accepting TCP connections
+    # (Docker port mapping can take a few seconds after the container is ready)
+    wait_for(lambda: tcp_open(ports["postgres"], timeout=2.0), f"PostgreSQL TCP port {ports['postgres']}", 15, delay=2.0)
     wait_for(lambda: run(docker_cmd + ["exec", "megatron_redis", "redis-cli", "-a", "root", "ping"], timeout=10).returncode == 0, "Redis", redis_wait)
 
     def neo4j_ready() -> bool:

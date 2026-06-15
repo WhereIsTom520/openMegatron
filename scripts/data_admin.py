@@ -115,14 +115,229 @@ async def clear_neo4j_memory(config: dict) -> int:
         await driver.close()
 
 
+async def trajectory_stats(args) -> int:
+    """Print trajectory store statistics."""
+    from pysrc.trajectory_store import TrajectoryStore
+    store = TrajectoryStore(db_path=args.db)
+    stats = store.stats()
+    print(json.dumps(stats, indent=2, ensure_ascii=False))
+    store.close()
+    return 0
+
+
+async def trajectory_export(args) -> int:
+    """Export trajectories as JSONL."""
+    from pysrc.trajectory_store import TrajectoryStore
+    store = TrajectoryStore(db_path=args.db)
+    count = store.export_jsonl(args.output)
+    print(f"Exported {count} trajectories to {args.output}")
+    store.close()
+    return 0
+
+
+async def trajectory_list(args) -> int:
+    """List recent trajectories."""
+    from pysrc.trajectory_store import TrajectoryStore
+    store = TrajectoryStore(db_path=args.db)
+    trajectories = store.query(
+        source=args.source or None,
+        success=args.success if hasattr(args, 'success') and args.success is not None else None,
+        limit=args.limit,
+    )
+    for t in trajectories:
+        print(json.dumps({
+            "id": t["id"],
+            "session_id": t["session_id"],
+            "user_input": t["user_input"][:100],
+            "success": t["success"],
+            "reward": t["reward"],
+            "tool_count": t["tool_count"],
+            "source": t["source"],
+            "created_at": t["created_at"],
+        }, ensure_ascii=False))
+    print(f"\n{len(trajectories)} trajectories shown (total: {store.count()})")
+    store.close()
+    return 0
+
+
+async def trajectory_import_claude(args) -> int:
+    """Parse and import Claude Code transcripts."""
+    from pysrc.claude_code_parser import ClaudeCodeParser
+    from pysrc.trajectory_store import TrajectoryStore
+    parser = ClaudeCodeParser()
+    input_path = Path(args.input)
+    if input_path.is_file():
+        turns = parser.parse_file(str(input_path))
+    elif input_path.is_dir():
+        turns = parser.parse_directory(str(input_path))
+    else:
+        print(f"Error: input path not found: {args.input}", file=__import__('sys').stderr)
+        return 1
+    trajectories = parser.to_trajectories(turns)
+    store = TrajectoryStore(db_path=args.db)
+    imported = 0
+    for traj in trajectories:
+        try:
+            store.store(traj)
+            imported += 1
+        except Exception as exc:
+            print(f"[WARN] Failed to import: {exc}")
+    print(f"Imported {imported} trajectories into {args.db}")
+    stats = store.stats()
+    print(f"Store now has {stats['total']} total trajectories")
+    store.close()
+    return 0
+
+
+async def trajectory_import(args) -> int:
+    """Import trajectories from Codex, OpenMegatron, or custom JSON/JSONL."""
+    from pysrc.trajectory_importer import TrajectoryImporter
+    from pysrc.trajectory_store import TrajectoryStore
+
+    importer = TrajectoryImporter()
+    try:
+        trajectories = importer.parse_path(
+            args.input,
+            format=args.format,
+            source=args.source,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=__import__('sys').stderr)
+        return 1
+
+    store = TrajectoryStore(db_path=args.db)
+    imported = 0
+    for traj in trajectories:
+        try:
+            store.store(traj)
+            imported += 1
+        except Exception as exc:
+            print(f"[WARN] Failed to import: {exc}")
+    print(f"Imported {imported} trajectories into {args.db}")
+    stats = store.stats()
+    print(f"Store now has {stats['total']} total trajectories")
+    store.close()
+    return 0
+
+
+async def _trajectory_train(args) -> int:
+    """Train a reward model from trajectory data."""
+    from pysrc.reward_model import create_scorer
+    from pysrc.reward_trainer import RewardTrainer
+    from pysrc.trajectory_store import TrajectoryStore
+    store = TrajectoryStore(db_path=args.db)
+    total = store.count()
+    print(f"Training data: {total} trajectories in {args.db}")
+    if total < 10:
+        print(f"Error: need at least 10 trajectories, have {total}")
+        store.close()
+        return 1
+    scorer = create_scorer(args.backend)
+    trainer = RewardTrainer(store, scorer)
+    result = trainer.train()
+    if "error" in result:
+        print(f"Error: {result['error']}")
+        store.close()
+        return 1
+    scorer.save(args.output)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(f"Model saved to {args.output}")
+    store.close()
+    return 0
+
+
+async def _trajectory_cv(args) -> int:
+    """Cross-validate reward model on trajectory data."""
+    from pysrc.reward_model import create_scorer
+    from pysrc.reward_trainer import RewardTrainer
+    from pysrc.trajectory_store import TrajectoryStore
+    store = TrajectoryStore(db_path=args.db)
+    scorer = create_scorer("sklearn")
+    trainer = RewardTrainer(store, scorer)
+    result = trainer.cross_validate(folds=args.folds)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    store.close()
+    return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Megatron local data manager")
     parser.add_argument("--config", default="pysrc/model.toml")
     parser.add_argument("--clear-conversations", action="store_true")
     parser.add_argument("--clear-memory", action="store_true")
     parser.add_argument("--confirm", action="store_true")
+
+    sub = parser.add_subparsers(dest="subcommand")
+
+    # trajectory stats
+    traj_stats = sub.add_parser("trajectory-stats", help="Show trajectory store statistics")
+    traj_stats.add_argument("--db", default=".trajectory/trajectories.db")
+
+    # trajectory export
+    traj_export = sub.add_parser("trajectory-export", help="Export trajectories as JSONL")
+    traj_export.add_argument("--db", default=".trajectory/trajectories.db")
+    traj_export.add_argument("--output", "-o", default="trajectories_export.jsonl")
+
+    # trajectory list
+    traj_list = sub.add_parser("trajectory-list", help="List recent trajectories")
+    traj_list.add_argument("--db", default=".trajectory/trajectories.db")
+    traj_list.add_argument("--limit", type=int, default=20)
+    traj_list.add_argument("--source")
+    traj_list.add_argument("--success", type=int, choices=[0, 1], default=None)
+
+    # trajectory import-claude
+    traj_import = sub.add_parser("trajectory-import-claude", help="Import Claude Code transcripts")
+    traj_import.add_argument("input")
+    traj_import.add_argument("--db", default=".trajectory/trajectories.db")
+
+    # trajectory import
+    traj_import_any = sub.add_parser(
+        "trajectory-import",
+        help="Import Codex/OpenMegatron/custom trajectory JSON, JSONL, or logs",
+    )
+    traj_import_any.add_argument("input")
+    traj_import_any.add_argument("--db", default=".trajectory/trajectories.db")
+    traj_import_any.add_argument(
+        "--format",
+        default="auto",
+        choices=["auto", "codex", "openmegatron", "generic"],
+        help="Input format hint (default: auto)",
+    )
+    traj_import_any.add_argument(
+        "--source",
+        help="Override stored source label, for example codex or my_framework",
+    )
+
+    # trajectory train
+    traj_train = sub.add_parser("trajectory-train", help="Train a reward model from trajectory data")
+    traj_train.add_argument("--db", default=".trajectory/trajectories.db")
+    traj_train.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"])
+    traj_train.add_argument("--output", "-o", default="model.pkl")
+
+    # trajectory cv
+    traj_cv = sub.add_parser("trajectory-cv", help="Cross-validate reward model on trajectory data")
+    traj_cv.add_argument("--db", default=".trajectory/trajectories.db")
+    traj_cv.add_argument("--folds", type=int, default=5)
+
     args = parser.parse_args()
 
+    # Route to trajectory subcommands
+    if args.subcommand == "trajectory-stats":
+        return await trajectory_stats(args)
+    elif args.subcommand == "trajectory-export":
+        return await trajectory_export(args)
+    elif args.subcommand == "trajectory-list":
+        return await trajectory_list(args)
+    elif args.subcommand == "trajectory-import-claude":
+        return await trajectory_import_claude(args)
+    elif args.subcommand == "trajectory-import":
+        return await trajectory_import(args)
+    elif args.subcommand == "trajectory-train":
+        return await _trajectory_train(args)
+    elif args.subcommand == "trajectory-cv":
+        return await _trajectory_cv(args)
+
+    # Original behavior
     if not args.confirm:
         print("[ERROR] Refusing to modify data without --confirm.")
         return 1

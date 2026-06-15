@@ -25,10 +25,49 @@ logger = logging.getLogger(__name__)
 class CacheEngine:
     """Redis-backed caching and real-time collaboration."""
 
-    def __init__(self, redis_client):
+    def __init__(self, redis_client=None, max_size: int = 1024, default_ttl: int = 300):
         self._redis = redis_client
         self._pubsub: Optional[asyncio.Task] = None
         self._handlers: dict[str, list] = {}
+        self._local_cache: dict[str, tuple[Any, float]] = {}
+        self._max_size = max_size
+        self._default_ttl = default_ttl
+        self.hits = 0
+        self.misses = 0
+
+    def set(self, key: str, value: Any, ttl: int = None) -> None:
+        if len(self._local_cache) >= self._max_size and key not in self._local_cache:
+            oldest = min(self._local_cache.items(), key=lambda item: item[1][1])[0]
+            self._local_cache.pop(oldest, None)
+        expires_at = time.time() + (ttl if ttl is not None else self._default_ttl)
+        self._local_cache[key] = (value, expires_at)
+
+    def get(self, key: str) -> Any:
+        item = self._local_cache.get(key)
+        if item is None:
+            self.misses += 1
+            return None
+        value, expires_at = item
+        if expires_at < time.time():
+            self._local_cache.pop(key, None)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return value
+
+    def delete(self, key: str) -> bool:
+        return self._local_cache.pop(key, None) is not None
+
+    def clear(self) -> None:
+        self._local_cache.clear()
+
+    def get_or_set(self, key: str, factory, ttl: int = None) -> Any:
+        value = self.get(key)
+        if value is not None:
+            return value
+        value = factory()
+        self.set(key, value, ttl)
+        return value
 
     # ── Graph query cache ──────────────────────────────
 

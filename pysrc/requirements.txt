@@ -2,6 +2,7 @@ aiofiles
 aiohttp
 apscheduler
 asyncpg
+beautifulsoup4
 fastapi
 json-repair
 mcp
@@ -11,10 +12,14 @@ openai
 pgvector
 pydantic
 pypdf
+python-pptx
+openpyxl
+pandas
 psutil
 pytest
 PyYAML
 redis
+scikit-learn
 sentence-transformers
 tomli; python_version < "3.11"
 torch

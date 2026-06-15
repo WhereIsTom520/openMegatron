@@ -882,6 +882,215 @@ class ScheduleTaskTool(BaseTool):
         }
 
 
+class RAGSearchTool(BaseTool):
+    """Search the RAG knowledge base with hybrid retrieval."""
+
+    def __init__(self, agent):
+        self.name = "rag_search"
+        self.description = (
+            "Search the document knowledge base using hybrid retrieval "
+            "(vector similarity + full-text + entity graph). "
+            "Returns ranked chunks with source citations and entity context. "
+            "Use this for answering questions about ingested documents."
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "strategy": {
+                    "type": "string",
+                    "enum": ["auto", "local", "global", "fused"],
+                    "description": "Search strategy. auto detects from query type.",
+                },
+                "top_k": {"type": "integer", "description": "Number of results. Default 10."},
+                "owner_id": {"type": "string", "description": "Owner filter for multi-tenant."},
+            },
+            "required": ["query"],
+        }
+        self.agent = agent
+
+    async def execute(self, query: str, strategy: str = "auto",
+                      top_k: int = 10, owner_id: str = "default",
+                      session_id: str = None):
+        from rag_retrieval import hybrid_search
+        try:
+            engine = getattr(self.agent, "_rag_engine", None)
+            config = getattr(self.agent, "config", {})
+            result = await hybrid_search(
+                query=query, owner_id=owner_id, scope="shared",
+                strategy=strategy, top_k=top_k,
+                engine=engine, config=config,
+            )
+            return json.dumps({
+                "status": "success",
+                "chunks": [
+                    {"text": c["text"][:500], "doc_id": c["doc_id"],
+                     "score": c["score"], "source": c["source"]}
+                    for c in result.get("chunks", [])[:top_k]
+                ],
+                "entities": result.get("entities", []),
+                "communities": result.get("communities", []),
+                "strategy": result.get("strategy"),
+                "elapsed_ms": result.get("elapsed_ms"),
+                "from_cache": result.get("from_cache", False),
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class RAGIngestTool(BaseTool):
+    """Ingest a document into the RAG knowledge base."""
+
+    def __init__(self, agent):
+        self.name = "rag_ingest"
+        self.description = (
+            "Ingest a document (PDF, Markdown, TXT, HTML, Office, code) "
+            "into the knowledge base. The document is chunked, embedded, "
+            "and entities are extracted into the graph."
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "Path to the document."},
+                "owner_id": {"type": "string", "description": "Owner for multi-tenant."},
+            },
+            "required": ["filepath"],
+        }
+        self.agent = agent
+
+    async def execute(self, filepath: str, owner_id: str = "default",
+                      session_id: str = None):
+        from rag_ingest import RAGIngestionPipeline
+        try:
+            config = getattr(self.agent, "config", {})
+            memory = getattr(self.agent, "memory_engine", None)
+            pipeline = RAGIngestionPipeline(memory, config)
+            result = await pipeline.ingest_file(filepath, owner_id)
+            return json.dumps({
+                "status": "success",
+                "doc_id": result.doc_id,
+                "title": result.title,
+                "file_type": result.file_type,
+                "chunk_count": result.chunk_count,
+                "entity_count": result.entity_count,
+                "elapsed_ms": result.elapsed_ms,
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class ScreenshotTool(BaseTool):
+    """Capture the screen and return a data URI for multimodal LLM input."""
+
+    def __init__(self, agent):
+        self.name = "screenshot"
+        self.description = (
+            "Capture the current screen and return a base64-encoded image. "
+            "Use this before making GUI automation decisions — the image "
+            "can be passed to vision-capable models for UI understanding."
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "save_path": {
+                    "type": "string",
+                    "description": "Optional file path to save the screenshot PNG.",
+                },
+            },
+        }
+        self.agent = agent
+
+    async def execute(self, save_path: str = None, session_id: str = None):
+        from screen_capture import capture_fullscreen
+        try:
+            result = capture_fullscreen(save_path)
+            return json.dumps({
+                "status": "success",
+                "width": result["width"],
+                "height": result["height"],
+                "base64_length": len(result["base64"]),
+                "data_uri": f"data:image/png;base64,{result['base64']}",
+                "saved_to": save_path,
+                "elapsed_ms": result["elapsed_ms"],
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class ExecuteGUIActionTool(BaseTool):
+    """Execute a GUI automation action (click, type, scroll, etc.) via PyAutoGUI."""
+
+    def __init__(self, agent):
+        self.name = "execute_gui_action"
+        self.description = (
+            "Execute a GUI automation action on the desktop: click, type, scroll, "
+            "drag, hotkey, press key, move mouse, sleep, or run a sequence of actions. "
+            "Use screenshot first to see the screen, then call this tool to interact."
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["click", "type", "scroll", "drag", "hotkey", "press",
+                             "move", "sleep", "screenshot", "sequence"],
+                    "description": "The GUI action to perform.",
+                },
+                "x": {"type": "number", "description": "X coordinate for click/move."},
+                "y": {"type": "number", "description": "Y coordinate for click/move."},
+                "relative": {
+                    "type": "boolean",
+                    "description": "If true, coordinates in [0,1000] range.",
+                },
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right", "middle"],
+                    "description": "Mouse button for click.",
+                },
+                "text": {"type": "string", "description": "Text to type."},
+                "keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Hotkey combination.",
+                },
+                "key": {"type": "string", "description": "Single key to press."},
+                "clicks": {"type": "integer", "description": "Scroll wheel clicks."},
+                "seconds": {"type": "number", "description": "Sleep duration."},
+                "actions": {
+                    "type": "array",
+                    "description": "List of actions for sequence mode.",
+                },
+            },
+            "required": ["action"],
+        }
+        self.agent = agent
+
+    async def execute(self, action: str, **kwargs):
+        from gui_actions import dispatch_action, execute_sequence
+        try:
+            if action == "sequence":
+                actions_list = kwargs.get("actions", [])
+                results = execute_sequence(actions_list)
+                return json.dumps({
+                    "status": "success",
+                    "action": "sequence",
+                    "total": len(results),
+                    "results": results,
+                }, ensure_ascii=False)
+            elif action == "screenshot":
+                from screen_capture import capture_fullscreen
+                result = capture_fullscreen(kwargs.get("save_path"))
+                result["status"] = "success"
+                result["base64_length"] = len(result.get("base64", ""))
+                result["base64"] = result.get("base64", "")[:200] + "..."
+                return json.dumps(result, ensure_ascii=False)
+            else:
+                result = dispatch_action(action, kwargs)
+                return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"status": "error", "action": action, "message": str(e)})
+
+
 class BackupSkillTool(BaseTool):
     def __init__(self, agent):
         self.name = "backup_skill"

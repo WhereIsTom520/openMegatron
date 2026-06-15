@@ -2,6 +2,7 @@
 SkillRouter wraps skill selection, ranking, and tool call repair."""
 
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 import platform
@@ -12,11 +13,55 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class RouteResult:
+    skill_name: str
+    confidence: float
+    tier: str = "standard"
+
+
+class _StandaloneRouterAgent:
+    loaded_skills = {
+        "code_assistant": {
+            "description": "Help write, debug, and explain code.",
+            "keywords": ["code", "python", "javascript", "write", "debug"],
+            "category": "code",
+        },
+        "default": {
+            "description": "Default conversational route.",
+            "keywords": [],
+            "category": "general",
+        },
+    }
+    skill_embeddings = {}
+    skill_docs = {}
+    memory_engine = None
+    domain_meta = {}
+    max_prompt_skills = 8
+    top_k_skills = 5
+    max_expert_opinions = 0
+    expert_debate_mode = "auto"
+    expert_debate_min_chars = 180
+
+    def get_clinical_rules(self) -> str:
+        return ""
+
+
 class SkillRouter:
     """Routes user intents to installed skills."""
 
-    def __init__(self, agent):
-        self._agent = agent
+    def __init__(self, agent=None):
+        self._agent = agent or _StandaloneRouterAgent()
+
+    def match(self, user_input: str) -> RouteResult:
+        """Return a lightweight route result for callers that only need routing."""
+        ranked = self._rank_skills(user_input or "")
+        if not ranked:
+            return RouteResult(skill_name="default", confidence=0.0)
+        score, name, _info = ranked[0]
+        confidence = max(0.0, min(1.0, float(score)))
+        return RouteResult(skill_name=name, confidence=confidence)
 
     @property
     def loaded_skills(self):
@@ -352,6 +397,11 @@ class SkillRouter:
             "monitoring": [
                 "监控", "订阅", "博客", "watch", "blog", "rss", "提醒", "定时"
             ],
+            "office": [
+                "ppt", "pptx", "powerpoint", "presentation", "slide", "slides", "deck",
+                "excel", "word", "docx", "xlsx", "csv", "pdf", "office",
+                "演示文稿", "幻灯片", "课件", "可编辑ppt", "表格", "文档"
+            ],
             "code": [
                 "\u4ee3\u7801", "\u7f16\u7a0b", "\u7801\u519c", "\u7a0b\u5e8f", "\u5f00\u53d1",
                 "\u4fee\u590d", "\u8c03\u8bd5", "\u62a5\u9519", "\u91cd\u6784", "\u5355\u5143\u6d4b\u8bd5",
@@ -372,6 +422,7 @@ class SkillRouter:
         ])
         category_keywords["media"].extend(["视频", "下载", "剪辑", "转码", "字幕", "音频"])
         category_keywords["monitoring"].extend(["监控", "订阅", "博客", "追踪", "提醒", "定时"])
+        category_keywords["office"].extend(["ppt", "pptx", "powerpoint", "presentation", "幻灯片", "演示文稿", "课件", "可编辑ppt"])
         scores = {}
         for category, keywords in category_keywords.items():
             scores[category] = sum(1 for keyword in keywords if keyword and keyword.lower() in lowered)

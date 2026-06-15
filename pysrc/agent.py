@@ -1,4 +1,4 @@
-﻿import os
+import os
 import ast
 import copy
 import json
@@ -28,6 +28,7 @@ from openai.types.chat.chat_completion_message_tool_call import Function
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.redis import RedisJobStore
 from decision_tracker import DecisionTracker
+from skill_router import SkillRouter
 from model_tier import (
     detect_model_tier, get_tier_config, MODEL_TIER_CONFIG,
     adapt_system_rules, adapt_execution_contract, adapt_tool_schema,
@@ -51,6 +52,7 @@ from confirmation_state import ConfirmationStateTracker
 from conversation_flow import ConversationFlow
 from text_tool_calls import TextToolCallParser
 from evolution import EvolutionError, EvolutionStore
+from auth import auth_manager
 
 from skill import (
     SearchMemoryTool, MemorizeFactTool, AmendMemoryTool, UpdateCoreMemoryTool,
@@ -59,7 +61,9 @@ from skill import (
     DelegateToRemoteAgentTool,
     RunSkillScriptTool, ReloadSkillsTool, SaveAsSkillTool, ScheduleTaskTool,
     PromoteScriptToSkillTool, BackupSkillTool, RestoreSkillTool, GitResetSkillTool,
-    ProposeEvolutionTool, OpenAPIBridge, MCPServerBridge, SmartSkillAdapterTool
+    ProposeEvolutionTool, OpenAPIBridge, MCPServerBridge, SmartSkillAdapterTool,
+    RAGSearchTool, RAGIngestTool,
+    ScreenshotTool, ExecuteGUIActionTool,
 )
 
 try:
@@ -274,6 +278,17 @@ class AgentContextManager:
 
         runtime_cfg = config.get("runtime", {})
         self.ttl_seconds = max(runtime_cfg.get("memory_ttl_days", 30), 1) * 86400
+
+    async def start_background_services(self):
+        """Start auto-retrain daemon, task-queue broadcaster, and other
+        long-running background services.  Call once after configure_llm()."""
+        cfg = self.config.get('auto_retrain', {})
+        if cfg.get('enabled', False):
+            interval = cfg.get('interval_seconds', 600)
+            self._start_auto_retrain_daemon(interval)
+        if cfg.get('task_queue_enabled', True):
+            self._init_task_queue()
+        self._init_validator_orchestrator()
 
     async def close(self):
         try:
@@ -664,6 +679,7 @@ class YuanGeAgent:
         self.scheduler_service = SchedulerService(self)
         self.confirmation_service = ConfirmationService(self)
         self.clinical_service = ClinicalService(self)
+        self.router = SkillRouter(self)
 
         redis_cfg = config.get("redis", {})
         redis_password = redis_cfg.get("password")
@@ -719,7 +735,9 @@ class YuanGeAgent:
             RegisterNewToolTool, DelegateToSubagentsTool, DelegateToRemoteAgentTool,
             InstallGithubSkillTool, SearchSkillMarketTool,
             RunSkillScriptTool, ReloadSkillsTool, SaveAsSkillTool, ScheduleTaskTool,
-            PromoteScriptToSkillTool, ProposeEvolutionTool, BackupSkillTool, RestoreSkillTool, GitResetSkillTool
+            PromoteScriptToSkillTool, ProposeEvolutionTool, BackupSkillTool, RestoreSkillTool, GitResetSkillTool,
+            RAGSearchTool, RAGIngestTool,
+            ScreenshotTool, ExecuteGUIActionTool
         ]:
             self.tool_manager.register(tool_cls(self))
 
@@ -809,6 +827,148 @@ class YuanGeAgent:
         self.conversation_flow = ConversationFlow()
         self.text_tool_call_parser = TextToolCallParser()
         self._trajectory_collector = None  # Set by trajectory_collector.install_collector()
+        self._auto_retrain = None          # Set by auto_retrain.install_auto_retrain()
+        self._trajectory_store = None    # Lazy-init on first use
+        self._feedback_collector = None  # Lazy-init on first use
+        self._task_queue = None          # Lazy-init TaskQueue
+        self._reward_integration = None  # Lazy-init RewardIntegration
+        self._validator_orchestrator = None  # Lazy-init ValidatorOrchestrator
+        self._auto_retrain_task = None   # asyncio.Task for background retrain loop
+        self._companion_loader = None    # Lazy-init CompanionModelLoader
+        self._companion_router = None    # Lazy-init CompanionRouter
+        self._companion_enabled = bool(
+            config.get("companion_model", {}).get("enabled", False)
+        )
+
+    def _init_companion_model(self):
+        """Lazy-init the companion model subsystem."""
+        if self._companion_router is not None:
+            return
+        try:
+            from companion_model import CompanionModelLoader
+            from companion_router import CompanionRouter
+            self._companion_loader = CompanionModelLoader()
+            self._companion_router = CompanionRouter(
+                agent=self,
+                companion_loader=self._companion_loader,
+            )
+            logger.info("Companion model subsystem initialized")
+        except Exception as e:
+            logger.debug("Companion model init skipped: %s", e)
+            self._companion_router = False
+
+
+        # ── Auto-init lightweight components ──
+        self._init_trajectory_collector()
+        self._init_reward_model()
+
+    def _init_trajectory_collector(self):
+        """Default-enable trajectory collection so every chat() persists traces."""
+        try:
+            from trajectory_store import TrajectoryStore
+            from trajectory_collector import TrajectoryCollector
+            db_dir = os.path.join(str(BASE_DIR.parent), '.trajectory')
+            os.makedirs(db_dir, exist_ok=True)
+            db_path = os.path.join(db_dir, 'trajectories.db')
+            self._trajectory_db_path = db_path
+            self._trajectory_store = TrajectoryStore(db_path)
+            self._trajectory_collector = TrajectoryCollector(self._trajectory_store)
+            logger.info('TrajectoryCollector auto-enabled at %s', db_path)
+        except Exception as e:
+            logger.debug('TrajectoryCollector init skipped: %s', e)
+
+    def _init_reward_model(self):
+        """Load trained reward model if available, otherwise use rule-based fallback."""
+        try:
+            from reward_integration import RewardIntegration, _load_scorer
+            model_dir = os.path.join(str(BASE_DIR.parent), '.models', 'reward')
+            candidates = []
+            if os.path.isdir(model_dir):
+                for f in sorted(os.listdir(model_dir), reverse=True):
+                    if f.endswith(('.pkl', '.pt', '.pth')):
+                        candidates.append(os.path.join(model_dir, f))
+            if candidates:
+                scorer = _load_scorer(candidates[0])
+                self._reward_integration = RewardIntegration(scorer)
+                logger.info('Reward model loaded: %s', candidates[0])
+        except Exception as e:
+            logger.debug('Reward model init skipped (using rule-based scoring): %s', e)
+
+    def _init_feedback_collector(self):
+        """Lazy-init FeedbackCollector bound to TrajectoryStore."""
+        if self._feedback_collector is None:
+            try:
+                from feedback_collector import FeedbackCollector
+                self._feedback_collector = FeedbackCollector(store=self._trajectory_store)
+            except Exception as e:
+                logger.debug('FeedbackCollector init skipped: %s', e)
+                self._feedback_collector = False  # Sentinel to avoid retry
+
+    def _init_task_queue(self):
+        """Lazy-init TaskQueue with WebSocket broadcast capability."""
+        if self._task_queue is None:
+            try:
+                from task_queue import TaskQueue
+                self._task_queue = TaskQueue()
+                # Install WebSocket broadcaster so frontend sees queue updates
+                if self.broadcast_event:
+                    self._task_queue.on_status_change = lambda task: (
+                        self.broadcast_event('task_queue_update', {
+                            'task_id': task.id,
+                            'status': task.status.value,
+                            'queue': task.queue,
+                            'type': task.type,
+                        })
+                    )
+                logger.info('TaskQueue initialized')
+            except Exception as e:
+                logger.debug('TaskQueue init skipped: %s', e)
+                self._task_queue = False
+
+    def _init_validator_orchestrator(self):
+        """Lazy-init ValidatorOrchestrator for unified tool output validation."""
+        if self._validator_orchestrator is None:
+            try:
+                from validator_orchestrator import ValidatorOrchestrator
+                self._validator_orchestrator = ValidatorOrchestrator()
+            except Exception as e:
+                logger.debug('ValidatorOrchestrator init skipped: %s', e)
+                self._validator_orchestrator = False
+
+    def _start_auto_retrain_daemon(self, interval: int = 600):
+        """Start background auto-retrain loop. Safe to call multiple times."""
+        if self._auto_retrain_task is not None and not self._auto_retrain_task.done():
+            return
+        try:
+            from auto_retrain import AutoRetrainLoop
+            loop = asyncio.get_event_loop()
+            store = getattr(self, '_trajectory_store', None)
+            if store is None:
+                logger.debug('AutoRetrain daemon skipped: no trajectory store')
+                return
+            trajectory_db = getattr(self, '_trajectory_db_path', None)
+            if not trajectory_db:
+                logger.debug('AutoRetrain daemon skipped: no trajectory db path')
+                return
+            retrain_loop = AutoRetrainLoop(trajectory_db=trajectory_db)
+            self._auto_retrain = retrain_loop
+            async def _daemon():
+                while True:
+                    try:
+                        should_retrain, total, new_count = retrain_loop.should_retrain()
+                        if should_retrain:
+                            logger.info(
+                                'AutoRetrain: threshold reached (%d/%d new), starting retrain...',
+                                new_count, total,
+                            )
+                            retrain_loop.trigger_retrain_async()
+                    except Exception as e:
+                        logger.warning('AutoRetrain daemon tick error: %s', e)
+                    await asyncio.sleep(interval)
+            self._auto_retrain_task = loop.create_task(_daemon())
+            logger.info('AutoRetrain daemon started (interval=%ss)', interval)
+        except Exception as e:
+            logger.debug('AutoRetrain daemon skipped: %s', e)
 
     def configure_llm(self, provider: str = None, model: str = None):
         provider_id = str(provider or self.llm_provider or self.config.get("llm_provider", "openai")).strip().lower()
@@ -827,6 +987,122 @@ class YuanGeAgent:
         self.model = selected_model
         self.extra_params = provider_cfg.get("extra_params", {}) or {}
         self.llm_provider = provider_id
+
+    def _sanitize_openai_tool_message_sequence(self, messages: List[dict]) -> List[dict]:
+        """Normalize OpenAI chat tool-call message ordering.
+
+        The Chat Completions API requires every assistant message with
+        ``tool_calls`` to be followed immediately by one tool message for each
+        emitted tool-call id. Runtime warnings or other system messages can be
+        generated between those records, so move them after the tool replies and
+        synthesize a small error reply for any missing tool result.
+        """
+        sanitized: List[dict] = []
+        consumed: set[int] = set()
+        i = 0
+
+        while i < len(messages):
+            if i in consumed:
+                i += 1
+                continue
+
+            msg = messages[i]
+            role = msg.get("role")
+
+            if role == "tool":
+                i += 1
+                continue
+
+            tool_calls = msg.get("tool_calls") or []
+            if role != "assistant" or not tool_calls:
+                sanitized.append(msg)
+                i += 1
+                continue
+
+            sanitized.append(msg)
+            expected_ids = [
+                str(call.get("id", ""))
+                for call in tool_calls
+                if isinstance(call, dict) and call.get("id")
+            ]
+            found_tools: dict[str, dict] = {}
+            delayed_messages: List[dict] = []
+
+            j = i + 1
+            while j < len(messages):
+                next_msg = messages[j]
+                next_role = next_msg.get("role")
+                if next_role in {"user", "assistant"}:
+                    break
+                consumed.add(j)
+                if next_role == "tool":
+                    tool_call_id = str(next_msg.get("tool_call_id", ""))
+                    if tool_call_id in expected_ids and tool_call_id not in found_tools:
+                        found_tools[tool_call_id] = next_msg
+                else:
+                    delayed_messages.append(next_msg)
+                j += 1
+
+            for tool_call_id in expected_ids:
+                sanitized.append(found_tools.get(tool_call_id) or {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({
+                        "status": "error",
+                        "message": "Tool call was interrupted before execution.",
+                    }, ensure_ascii=False),
+                })
+            sanitized.extend(delayed_messages)
+            i += 1
+
+        return sanitized
+
+    def _build_multimodal_content(self, text: str, image_data_uri: str = None):
+        """Build OpenAI-compatible multimodal user content."""
+        if not image_data_uri:
+            return text
+        return [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": image_data_uri, "detail": "high"}},
+        ]
+
+    def _has_vision_support(self) -> bool:
+        """Check whether the selected model name is likely to accept images."""
+        model_lower = str(self.model or "").lower()
+        vision_indicators = [
+            "vision", "vl", "holo", "gemini", "claude", "gpt-4o",
+            "gpt-4-turbo", "gpt-4.1", "qwen-vl", "llava", "cogvlm",
+            "pixtral", "multimodal",
+        ]
+        return any(indicator in model_lower for indicator in vision_indicators)
+
+    def _inject_screenshot(self, msgs: list, session_id: str) -> list:
+        """Attach a current screenshot to the latest user message when possible."""
+        if not self._has_vision_support():
+            return msgs
+        try:
+            from screen_capture import capture_to_data_uri
+            uri = capture_to_data_uri()
+        except Exception as e:
+            logger.debug("Screenshot injection skipped: %s", e)
+            return msgs
+
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i].get("role") == "user" and isinstance(msgs[i].get("content"), str):
+                msgs[i]["content"] = self._build_multimodal_content(msgs[i]["content"], uri)
+                break
+        return msgs
+
+    @staticmethod
+    def _companion_response_can_finish_directly(response: dict) -> bool:
+        """Return True when a companion response is safe to return as text."""
+        if not isinstance(response, dict):
+            return False
+        if response.get("error"):
+            return False
+        if response.get("tool_calls"):
+            return False
+        return bool(str(response.get("content") or "").strip())
 
     def _persist_allowed_cmds(self, new_cmd: str):
         config_path = "model.toml"
@@ -931,9 +1207,11 @@ class YuanGeAgent:
 
     def _iter_skill_dirs(self) -> List[Path]:
         skill_dirs = []
+        seen = set()
         if not self.skills_dir.exists():
             return skill_dirs
-        for skill_md in self.skills_dir.rglob("SKILL.md"):
+        skill_files = list(self.skills_dir.rglob("SKILL.md")) + list(self.skills_dir.rglob("skill.md"))
+        for skill_md in skill_files:
             skill_dir = skill_md.parent
             try:
                 rel = skill_dir.relative_to(self.skills_dir)
@@ -941,6 +1219,9 @@ class YuanGeAgent:
                 continue
             if any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
                 continue
+            if skill_dir in seen:
+                continue
+            seen.add(skill_dir)
             skill_dirs.append(skill_dir)
         return sorted(skill_dirs, key=lambda p: str(p.relative_to(self.skills_dir)).lower())
 
@@ -963,6 +1244,8 @@ class YuanGeAgent:
         self.skill_docs = {}
         for skill_dir in self._iter_skill_dirs():
             skill_md_path = skill_dir / "SKILL.md"
+            if not skill_md_path.exists():
+                skill_md_path = skill_dir / "skill.md"
             try:
                 async with aiofiles.open(skill_md_path, 'r', encoding='utf-8') as f:
                     md_content = await f.read()
@@ -1182,6 +1465,17 @@ class YuanGeAgent:
                 await self.broadcast_event("memory_hot_reload_started", {"ledger_path": str(ledger_path)})
         except Exception as e:
             logger.warning(f"Memory ledger hot-reload disabled: {e}")
+
+    async def start_background_services(self):
+        """Start auto-retrain daemon, task-queue broadcaster, and other
+        long-running background services.  Call once after configure_llm()."""
+        cfg = self.config.get('auto_retrain', {})
+        if cfg.get('enabled', False):
+            interval = cfg.get('interval_seconds', 600)
+            self._start_auto_retrain_daemon(interval)
+        if cfg.get('task_queue_enabled', True):
+            self._init_task_queue()
+        self._init_validator_orchestrator()
 
     async def close(self):
         if self._background_thinker_task and not self._background_thinker_task.done():
@@ -2475,6 +2769,11 @@ class YuanGeAgent:
             "monitoring": [
                 "监控", "订阅", "博客", "watch", "blog", "rss", "提醒", "定时"
             ],
+            "office": [
+                "ppt", "pptx", "powerpoint", "presentation", "slide", "slides", "deck",
+                "excel", "word", "docx", "xlsx", "csv", "pdf", "office",
+                "演示文稿", "幻灯片", "课件", "可编辑ppt", "表格", "文档"
+            ],
             "code": [
                 "\u4ee3\u7801", "\u7f16\u7a0b", "\u7801\u519c", "\u7a0b\u5e8f", "\u5f00\u53d1",
                 "\u4fee\u590d", "\u8c03\u8bd5", "\u62a5\u9519", "\u91cd\u6784", "\u5355\u5143\u6d4b\u8bd5",
@@ -2495,6 +2794,7 @@ class YuanGeAgent:
         ])
         category_keywords["media"].extend(["视频", "下载", "剪辑", "转码", "字幕", "音频"])
         category_keywords["monitoring"].extend(["监控", "订阅", "博客", "追踪", "提醒", "定时"])
+        category_keywords["office"].extend(["ppt", "pptx", "powerpoint", "presentation", "幻灯片", "演示文稿", "课件", "可编辑ppt"])
         scores = {}
         for category, keywords in category_keywords.items():
             scores[category] = sum(1 for keyword in keywords if keyword and keyword.lower() in lowered)
@@ -3165,285 +3465,71 @@ class YuanGeAgent:
         )
 
     def _summarize_tool_call_for_learning(self, call: dict) -> dict:
-        parsed = call.get("parsed_output")
-        status = None
-        completed = None
-        produces = None
-        message = None
-        if isinstance(parsed, dict):
-            status = parsed.get("status")
-            completed = parsed.get("completed")
-            produces = parsed.get("produces") or parsed.get("result") or parsed.get("results")
-            message = parsed.get("message")
-        skill_name = None
-        skill_args = None
-        if call.get("tool") == "run_skill_script":
-            try:
-                args = json.loads(call.get("arguments") or "{}")
-                skill_name = args.get("skill_name")
-                raw_args = args.get("args_string") or args.get("params_json")
-                if isinstance(raw_args, str):
-                    try:
-                        skill_args = json.loads(raw_args)
-                    except Exception:
-                        skill_args = raw_args
-                else:
-                    skill_args = raw_args
-            except Exception:
-                pass
-        return {
-            "tool": call.get("tool"),
-            "skill": skill_name,
-            "skill_args": skill_args,
-            "status": status,
-            "completed": completed,
-            "produces": produces,
-            "message": message
-        }
+        return self.router._summarize_tool_call_for_learning(call)
 
     @staticmethod
     def _json_dumps_safe(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
 
-    @staticmethod
-    def _message_role(message: Any) -> str:
-        if isinstance(message, dict):
-            return str(message.get("role") or "")
-        return str(getattr(message, "role", "") or "")
-
-    @staticmethod
-    def _message_tool_call_id(message: Any) -> str:
-        if isinstance(message, dict):
-            return str(message.get("tool_call_id") or "")
-        return str(getattr(message, "tool_call_id", "") or "")
-
-    @staticmethod
-    def _message_tool_call_ids(message: Any) -> list[str]:
-        if isinstance(message, dict):
-            tool_calls = message.get("tool_calls") or []
-        else:
-            tool_calls = getattr(message, "tool_calls", None) or []
-        ids: list[str] = []
-        for call in tool_calls:
-            call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", "")
-            if call_id:
-                ids.append(str(call_id))
-        return ids
-
-    def _sanitize_openai_tool_message_sequence(self, messages: list[Any]) -> list[Any]:
-        """Ensure every assistant tool_call is immediately followed by matching tool messages."""
-        sanitized: list[Any] = []
-        i = 0
-        while i < len(messages):
-            message = messages[i]
-            role = self._message_role(message)
-            if role == "tool":
-                i += 1
-                continue
-            tool_call_ids = self._message_tool_call_ids(message)
-            if role != "assistant" or not tool_call_ids:
-                sanitized.append(message)
-                i += 1
-                continue
-            sanitized.append(message)
-            answered: set[str] = set()
-            j = i + 1
-            while j < len(messages) and self._message_role(messages[j]) == "tool":
-                tool_call_id = self._message_tool_call_id(messages[j])
-                if tool_call_id in tool_call_ids and tool_call_id not in answered:
-                    sanitized.append(messages[j])
-                    answered.add(tool_call_id)
-                j += 1
-            for tool_call_id in tool_call_ids:
-                if tool_call_id not in answered:
-                    sanitized.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": json.dumps({
-                            "status": "error",
-                            "message": "Tool response was missing and was replaced by the agent message sanitizer.",
-                            "completed": False,
-                        }, ensure_ascii=False),
-                    })
-            i = j
-        return sanitized
+    def _tokenize_for_routing(self, text: str) -> set:
+        normalized = text.lower()
+        tokens = set(re.findall(r'[a-zA-Z0-9_\-\.\/]+|[一-鿿]{1,4}', normalized))
+        return {token for token in tokens if token.strip()}
 
     def _filter_relevant_past_patterns(self, query: str, patterns: list[dict], limit: int = 3) -> list[dict]:
-        if not patterns:
-            return []
-        stop_tokens = {
-            "2024", "2025", "2026", "论文", "文献", "研究", "科研", "综述", "帮我", "一下",
-            "以来", "给出", "链接", "paper", "papers", "research", "review", "search", "fetch"
-        }
-        query_tokens = {tok for tok in self._tokenize_for_routing(query) if tok not in stop_tokens}
-        if not query_tokens:
-            return []
-        query_text = str(query or "").lower()
-        marker_groups = [
-            ("人机", "human"),
-            ("协同", "collaboration"),
-            ("智能体", "agent"),
-            ("记忆", "memory"),
-            ("信息管理", "information management"),
-            ("信息系统", "information systems"),
-            ("信管", "mis"),
-        ]
-        scored = []
-        for pattern in patterns:
-            if not isinstance(pattern, dict):
-                continue
-            text = " ".join([
-                str(pattern.get("goal_type", "")),
-                str(pattern.get("notes", "")),
-                " ".join([str(x) for x in pattern.get("preconditions", []) or []]),
-                " ".join([str(x) for x in pattern.get("successful_chain", []) or []]),
-                " ".join([str(x) for x in pattern.get("example_user_goals", []) or []]),
-            ]).lower()
-            if any((zh in query_text or en in query_text) and not (zh in text or en in text) for zh, en in marker_groups):
-                continue
-            pattern_tokens = {tok for tok in self._tokenize_for_routing(text) if tok not in stop_tokens}
-            overlap = len(query_tokens & pattern_tokens)
-            ratio = overlap / max(1, min(len(query_tokens), len(pattern_tokens)))
-            if overlap >= 2 and ratio >= 0.25:
-                scored.append((overlap + ratio, pattern))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [pattern for _, pattern in scored[:limit]]
+        router = getattr(self, 'router', None)
+        if router is not None:
+            return router._filter_relevant_past_patterns(query, patterns, limit)
+        return []
 
     def _score_task_trace(self, trace: dict) -> dict:
+        if getattr(self, '_reward_integration', None):
+            try:
+                return self._reward_integration.score_trace(trace)
+            except Exception:
+                pass
+        router = getattr(self, 'router', None)
+        if router is not None:
+            return router._score_task_trace(trace)
+        # Fallback: rule-based scoring (used by guardrail tests that skip __init__)
         tool_calls = trace.get("tool_calls", []) or []
         if not tool_calls:
-            return {
-                "reward": 0.2 if trace.get("final_answer") else 0.0,
-                "confidence": 0.35 if trace.get("final_answer") else 0.0,
-                "dimensions": {
-                    "success": bool(trace.get("final_answer")),
-                    "stability": 1.0,
-                    "speed": 1.0,
-                    "efficiency": 1.0,
-                    "tool_count": 0,
-                    "duration_ms": 0.0
-                }
-            }
-        failures = 0
-        successes = 0
-        total_duration_ms = 0.0
-        for call in tool_calls:
-            parsed = call.get("parsed_output") if isinstance(call.get("parsed_output"), dict) else {}
-            status = str(parsed.get("status") or "").lower()
-            failed = status in {"error", "denied"} or bool(parsed.get("error"))
-            failures += 1 if failed else 0
-            successes += 0 if failed else 1
-            total_duration_ms += float(call.get("duration_ms") or 0.0)
-        tool_count = len(tool_calls)
-        stability = successes / tool_count if tool_count else 1.0
-        speed = 1.0 / (1.0 + (total_duration_ms / 60000.0))
-        efficiency = 1.0 / (1.0 + max(0, tool_count - 3) * 0.18)
-        completion = 1.0 if trace.get("success") else 0.0
-        reward = max(0.0, min(1.0, 0.45 * completion + 0.25 * stability + 0.20 * speed + 0.10 * efficiency))
-        confidence = max(0.0, min(1.0, 0.50 * stability + 0.25 * speed + 0.25 * completion))
-        return {
-            "reward": round(reward, 4),
-            "confidence": round(confidence, 4),
-            "dimensions": {
-                "success": bool(trace.get("success")),
-                "stability": round(stability, 4),
-                "speed": round(speed, 4),
-                "efficiency": round(efficiency, 4),
-                "tool_count": tool_count,
-                "failures": failures,
-                "duration_ms": round(total_duration_ms, 2)
-            }
-        }
+            return {"reward": 0.2 if trace.get("final_answer") else 0.0,
+                    "confidence": 0.35 if trace.get("final_answer") else 0.0,
+                    "dimensions": {"success": bool(trace.get("final_answer")),
+                                   "stability": 1.0, "speed": 1.0,
+                                   "efficiency": 1.0, "tool_count": 0,
+                                   "duration_ms": 0.0}}
+        failures = sum(1 for c in tool_calls
+                       if str((c.get("parsed_output") or {}).get("status", "")).lower() in {"error", "denied"}
+                       or bool((c.get("parsed_output") or {}).get("error")))
+        successes = len(tool_calls) - failures
+        total_duration = sum(float(c.get("duration_ms", 0)) for c in tool_calls)
+        stb = successes / len(tool_calls) if tool_calls else 1.0
+        spd = 1.0 / (1.0 + total_duration / 60000.0)
+        eff = 1.0 / (1.0 + max(0, len(tool_calls) - 3) * 0.18)
+        cmp = 1.0 if trace.get("success") else 0.0
+        rwd = max(0.0, min(1.0, 0.45 * cmp + 0.25 * stb + 0.20 * spd + 0.10 * eff))
+        cfd = max(0.0, min(1.0, 0.50 * stb + 0.25 * spd + 0.25 * cmp))
+        return {"reward": round(rwd, 4), "confidence": round(cfd, 4),
+                "dimensions": {"success": bool(trace.get("success")),
+                               "stability": round(stb, 4), "speed": round(spd, 4),
+                               "efficiency": round(eff, 4), "tool_count": len(tool_calls),
+                               "failures": failures, "duration_ms": round(total_duration, 2)}}
 
     async def _learn_from_task_trace(self, trace: dict):
-        if not trace or not trace.get("tool_calls"):
-            return
-        reward_profile = self._score_task_trace(trace)
-        trace["reward_profile"] = reward_profile
-        try:
-            await self.ctx.record_tool_reward_stats(trace.get("tool_calls", []), reward_profile)
-        except Exception as e:
-            logger.debug(f"Tool reward stats write skipped: {e}")
-        summarized_calls = [self._summarize_tool_call_for_learning(call) for call in trace.get("tool_calls", [])]
-        successful_chain = []
-        for call in summarized_calls:
-            status = call.get("status")
-            if status == "error":
-                continue
-            name = call.get("skill") or call.get("tool")
-            if name and name not in successful_chain:
-                successful_chain.append(name)
-        if not successful_chain:
-            return
-        compact_trace = {
-            "user_goal": trace.get("user_goal"),
-            "success": bool(trace.get("success")),
-            "reward_profile": reward_profile,
-            "selected_skills": trace.get("selected_skills", []),
-            "tool_calls": summarized_calls[-10:]
-        }
-        prompt = (
-            "Return one JSON object describing a reusable workflow pattern from this agent task. "
-            "Do not create platform-specific rules unless they are explicitly represented by tool names or tool metadata. "
-            "Prefer general preconditions and reusable tool-chain logic. "
-            "Include whether this workflow should be reused or demoted based on reward_profile. "
-            "Schema: {\"goal_type\": string, \"preconditions\": string[], \"successful_chain\": string[], \"notes\": string, \"should_create_skill\": boolean, \"reuse_confidence\": number}.\n"
-            f"Trace: {json.dumps(compact_trace, ensure_ascii=False)}"
-        )
-        try:
-            res = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You extract reusable workflow patterns for an autonomous tool-using agent. Return JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                **self.extra_params
-            )
-            pattern = json.loads(res.choices[0].message.content)
-        except Exception:
-            pattern = {
-                "goal_type": "tool_chain_task",
-                "preconditions": ["A similar user goal required multiple tool calls"],
-                "successful_chain": successful_chain,
-                "notes": "Reuse this chain only when current available skills and required parameters still match.",
-                "should_create_skill": False
-            }
-        if not isinstance(pattern, dict):
-            return
-        chain = pattern.get("successful_chain")
-        if not isinstance(chain, list) or not chain:
-            pattern["successful_chain"] = successful_chain
-        pattern["success_count"] = 1 if trace.get("success") else 0
-        pattern["failure_count"] = 0 if trace.get("success") else 1
-        pattern["example_user_goals"] = [str(trace.get("user_goal", ""))[:300]]
-        pattern["metadata"] = {
-            "selected_skills": trace.get("selected_skills", []),
-            "tool_count": len(trace.get("tool_calls", [])),
-            "reward_profile": reward_profile,
-            "started_at": trace.get("started_at")
-        }
-        pattern["last_seen"] = time.time()
-        try:
-            await self.ctx.record_task_pattern(pattern)
-        except Exception:
-            pass
-        try:
-            workflow_id = await self.memory_engine.add_workflow_pattern(pattern)
-            pattern["workflow_pattern_id"] = workflow_id
-            if self.broadcast_event:
-                await self.broadcast_event("workflow_pattern_learned", {
-                    "id": workflow_id,
-                    "goal_type": pattern.get("goal_type"),
-                    "chain": pattern.get("successful_chain", [])
-                })
-        except Exception as e:
-            logger.warning(f"Workflow pattern database persistence skipped: {e}")
-        try:
-            await self.dehydrator.process(trace.get("session_id", "default"), "Reusable Task Pattern:\n" + self._json_dumps_safe(pattern))
-        except Exception:
-            pass
+        router = getattr(self, 'router', None)
+        if router is not None:
+            await router._learn_from_task_trace(trace)
 
+    async def _collect_feedback(self, task_trace: dict, session_id: str, user_input: str):
+        """Collect implicit user feedback after each chat turn."""
+        try:
+            self._init_feedback_collector()
+            if self._feedback_collector:
+                self._feedback_collector.collect_from_trace(task_trace)
+        except Exception:
+            pass
 
     async def chat(self, session_id: str, user_input: str, domain: str = "auto"):
         session_id = session_id or "default"
@@ -3595,10 +3681,62 @@ class YuanGeAgent:
         if opinions_str and opinions_str != "[]":
             user_prompt += f"\nExpert Opinions:\n{opinions_str}"
         msgs.append({"role": "user", "content": user_prompt})
+
+        # If using a vision model, inject current screenshot into first user message
+        if self._has_vision_support():
+            msgs = self._inject_screenshot(msgs, session_id)
+
         tool_failure_counter = {}
         last_tool_call = None
         repeat_count = 0
         skill_failures = {}
+
+        async def finish_with_answer(ans: str, source: str = "cloud", success: bool = True):
+            task_trace["success"] = bool(success)
+            task_trace["final_answer"] = ans
+            task_trace.setdefault("metadata", {})
+            task_trace["metadata"]["answer_source"] = source
+            await self.ctx.add_history(session_id, "assistant", ans)
+            await self._learn_from_task_trace(task_trace)
+            await self._collect_feedback(task_trace, session_id, user_input)
+            if self._trajectory_collector:
+                await self._trajectory_collector.collect(task_trace)
+            await self.dehydrator.process(session_id, f"User: {user_input}\nConsensus: {ans}")
+            for step in blackboard.steps:
+                if step.status.value in ("pending", "in_progress"):
+                    blackboard.complete(step.id, summary="Task completed")
+            if self.broadcast_event:
+                await self.broadcast_event("blackboard_update", {
+                    "session_id": session_id,
+                    "blackboard": blackboard.to_dict(),
+                    "report": blackboard.progress_report(),
+                })
+                await self.broadcast_event("chat_end", {"session_id": session_id, "answer_preview": ans[:200]})
+            return ans
+
+        # ── Companion model: try local model first for simple tasks ──
+        companion_response = None
+        if self._companion_enabled:
+            try:
+                self._init_companion_model()
+                if self._companion_router and self._companion_router is not False:
+                    from companion_router import CompanionRouter
+                    complexity = CompanionRouter.estimate_complexity(user_input)
+                    decision = self._companion_router.decide(user_input, task_complexity=complexity)
+                    if decision.target.value == "companion":
+                        companion_response = await self._companion_router.call_companion(msgs, self.tool_manager.get_schemas())
+                        if self._companion_router.is_response_acceptable(companion_response):
+                            logger.info(f"Companion model handled request (complexity={complexity:.2f})")
+                            if self._companion_response_can_finish_directly(companion_response):
+                                return await finish_with_answer(
+                                    str(companion_response.get("content") or "").strip(),
+                                    source="companion",
+                                    success=True,
+                                )
+                            logger.info("Companion returned tool calls; falling back to cloud execution")
+            except Exception as e:
+                logger.debug(f"Companion model attempt skipped: {e}")
+
         for step in range(self.max_agent_steps):
             try:
                 msgs = self._sanitize_openai_tool_message_sequence(msgs)
@@ -3819,7 +3957,7 @@ class YuanGeAgent:
                                         )
                                         task_trace["success"] = False
                                         task_trace["final_answer"] = error_answer
-                                        await self._learn_from_task_trace(task_trace)
+                                        await self._learn_from_task_trace(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
                                         if self._trajectory_collector:
                                             await self._trajectory_collector.collect(task_trace)
                                         return error_answer
@@ -3858,7 +3996,7 @@ class YuanGeAgent:
                 task_trace["success"] = bool(task_trace.get("tool_calls"))
                 task_trace["final_answer"] = ans
                 await self.ctx.add_history(session_id, "assistant", ans)
-                await self._learn_from_task_trace(task_trace)
+                await self._learn_from_task_trace(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
                 if self._trajectory_collector:
                     await self._trajectory_collector.collect(task_trace)
                 await self.dehydrator.process(session_id, f"User: {user_input}\nConsensus: {ans}")
@@ -3877,7 +4015,7 @@ class YuanGeAgent:
         timeout_answer = "Task took too long."
         task_trace["success"] = False
         task_trace["final_answer"] = timeout_answer
-        await self._learn_from_task_trace(task_trace)
+        await self._learn_from_task_trace(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
         if self._trajectory_collector:
             await self._trajectory_collector.collect(task_trace)
         # ── Blackboard: mark current step failed on timeout ──
@@ -5198,4 +5336,3 @@ if __name__ == "__main__":
         gw.run(host=args.host, port=args.port)
     else:
         asyncio.run(main())
-

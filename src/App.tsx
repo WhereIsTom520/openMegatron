@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -43,6 +43,8 @@ const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:80
 const HISTORY_KEY = 'megatron_chat_history';
 
 import SkillEditorModal from './components/SkillEditorModal.tsx';
+import ChatSearch from './components/ChatSearch.tsx';
+import MultiSessionTabs from './components/MultiSessionTabs.tsx';
 const WORKSPACE_KEY = 'megatron_workspace_state_v1';
 const TASK_QUEUE_KEY = 'megatron_task_queue_v1';
 const DEFAULT_PROJECT_TITLE = 'Local Workspace';
@@ -774,6 +776,8 @@ export default function App() {
   const [evolutionManagerOpen, setEvolutionManagerOpen] = useState(false);
   const [dataActionMessage, setDataActionMessage] = useState('');
   const [activeBlackboard, setActiveBlackboard] = useState<{steps: Array<{id:string;description:string;status:string;duration_ms:number;strategy:string;result_summary:string;retry_count:number;error:string}>;progress:{total:number;completed:number;failed:number;in_progress:number;pending:number;percent:number};report?:string} | null>(null);
+  const [chatSearchMessages, setChatSearchMessages] = useState<Message[]>([]);
+  const [chatSearchScrollTo, setChatSearchScrollTo] = useState<string | null>(null);
 
   useEffect(() => {
     saveWorkspaceState(workspace);
@@ -948,6 +952,8 @@ export default function App() {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [activeProject, workspace.conversations]);
   const messages = activeConversation?.messages || [];
+  // Keep search index in sync
+  useEffect(() => { setChatSearchMessages(messages); }, [messages]);
   const activeMembers = activeConversation?.members || [];
   const activeMember = activeMembers.find((member) => member.id === activeConversation?.activeUserId) || activeMembers[0] || { id: 'local-user', name: 'Owner', color: MEMBER_COLORS[0] };
   const activeSessionId = getConversationSessionId(activeConversation || workspace.activeConversationId);
@@ -2000,6 +2006,7 @@ function MainChat({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+          <ChatSearch messages={chatSearchMessages} onJumpToMessage={(id) => setChatSearchScrollTo(id)} />
           <MemberPicker lang={lang} members={members} activeMemberId={activeMemberId} onSelect={onSelectMember} onAdd={onAddMember} />
           <ModelPicker lang={lang} providers={modelProviders} selection={modelSelection} onSelect={onSelectModel} />
           <IconButton testId="clear-history" title={lang === 'zh' ? '清空历史' : 'Clear history'} onClick={onClearHistory}>
@@ -2447,6 +2454,8 @@ function CodeBlock({ language, content }: { language?: string; content: string }
       <SyntaxHighlighter
         language={language || 'text'}
         style={oneDark}
+        showLineNumbers
+        lineNumberStyle={{ color: '#4b5563', fontSize: '10px', minWidth: '2em' }}
         customStyle={{ background: 'transparent', margin: 0, padding: '14px', fontSize: '12px', lineHeight: 1.6 }}
         wrapLongLines
       >

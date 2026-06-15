@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
+
+def error_response(message: str, status: int = 400) -> dict:
+    """Return the legacy API error payload shape."""
+    return {"error": message, "status": status}
+
 from pysrc.evolution import EvolutionStore
 
 try:
@@ -85,6 +90,8 @@ class WebhookChannelAdapter(ChannelAdapter):
             "text": payload.get("text", ""),
             "raw": payload
         }
+
+
 
 
 class IMGateway:
@@ -174,6 +181,163 @@ class AgentAPI:
         self.app.get("/skills/read")(self.read_skill_file_endpoint)
         self.app.post("/skills/write")(self.write_skill_file_endpoint)
         self.app.post("/skills/rollback")(self.rollback_skill_file_endpoint)
+
+        # RAG endpoints
+        self.app.post("/rag/ingest")(self.rag_ingest_endpoint)
+        self.app.post("/rag/query")(self.rag_query_endpoint)
+        self.app.get("/rag/documents")(self.rag_list_documents_endpoint)
+        self.app.delete("/rag/documents/{doc_id}")(self.rag_delete_document_endpoint)
+        self.app.get("/rag/communities")(self.rag_list_communities_endpoint)
+        self.app.get("/rag/status")(self.rag_status_endpoint)
+
+# RAG Endpoints
+
+async def rag_ingest_endpoint(self, request: Request, background_tasks: BackgroundTasks):
+    """Ingest a document into the RAG knowledge base."""
+    from rag_ingest import RAGIngestionPipeline
+    try:
+        body = await request.json()
+        filepath = body.get("filepath", body.get("path", ""))
+        owner_id = body.get("owner_id", "default")
+        scope = body.get("scope", "shared")
+        if not filepath:
+            return error_response("filepath is required", 400)
+        pipeline = RAGIngestionPipeline(
+            self.agent.memory_engine if self.agent else None,
+            self.config,
+        )
+        result = await pipeline.ingest_file(filepath, owner_id, scope)
+        return {
+            "status": "ok",
+            "doc_id": result.doc_id,
+            "title": result.title,
+            "chunk_count": result.chunk_count,
+            "entity_count": result.entity_count,
+            "elapsed_ms": result.elapsed_ms,
+        }
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logger.exception("RAG ingest failed")
+        return error_response(str(e), 500)
+
+async def rag_query_endpoint(self, request: Request):
+    """Query the RAG knowledge base."""
+    from rag_retrieval import hybrid_search
+    try:
+        body = await request.json()
+        query = body.get("query", "")
+        owner_id = body.get("owner_id", "default")
+        scope = body.get("scope", "shared")
+        strategy = body.get("strategy", "auto")
+        top_k = body.get("top_k", 10)
+        generate = body.get("generate", False)
+        if not query:
+            return error_response("query is required", 400)
+        engine = getattr(self.agent, "_rag_engine", None) if self.agent else None
+        result = await hybrid_search(
+            query=query, owner_id=owner_id, scope=scope,
+            strategy=strategy, top_k=top_k,
+            engine=engine, config=self.config,
+        )
+        if generate and self.agent and self.agent.client:
+            from rag_answer import generate_answer as gen_ans
+            from rag_retrieval import SemanticCache
+            from rag_ingest import EmbeddingProvider
+            embedder = EmbeddingProvider(self.config)
+            cache = SemanticCache(self.agent.ctx.redis, embedder) if self.agent.ctx else None
+            answer = await gen_ans(
+                query=query, retrieval_result=result,
+                client=self.agent.client, model=self.agent.model,
+                extra_params=self.agent.extra_params,
+                redis_cache=cache, embedder=embedder,
+                config=self.config,
+            )
+            from rag_answer import format_answer_with_sources
+            result["answer"] = {
+                "text": answer.text,
+                "citations": answer.citations,
+                "sources_used": answer.sources_used,
+                "formatted": format_answer_with_sources(answer, result),
+            }
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.exception("RAG query failed")
+        return error_response(str(e), 500)
+
+async def rag_list_documents_endpoint(self, request: Request):
+    """List all ingested documents."""
+    owner_id = request.query_params.get("owner_id", "default")
+    scope = request.query_params.get("scope", "shared")
+    if not self.agent or not self.agent.memory_engine:
+        return {"status": "ok", "documents": []}
+    try:
+        async with self.agent.memory_engine.pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, title, source, file_type, chunk_count, owner_id, scope, created_at
+                   FROM rag_documents
+                   WHERE owner_id = $1 AND scope = $2
+                   ORDER BY created_at DESC""",
+                owner_id, scope,
+            )
+            docs = [dict(row) for row in rows]
+            for d in docs:
+                d["created_at"] = str(d["created_at"])
+        return {"status": "ok", "documents": docs}
+    except Exception as e:
+        return error_response(str(e), 500)
+
+async def rag_delete_document_endpoint(self, doc_id: str, request: Request):
+    """Delete a document and all its chunks."""
+    if not self.agent or not self.agent.memory_engine:
+        return error_response("Agent not initialized", 503)
+    try:
+        async with self.agent.memory_engine.pg_pool.acquire() as conn:
+            await conn.execute("DELETE FROM rag_chunks WHERE doc_id = $1", doc_id)
+            await conn.execute("DELETE FROM rag_documents WHERE id = $1", doc_id)
+        return {"status": "ok", "deleted": doc_id}
+    except Exception as e:
+        return error_response(str(e), 500)
+
+async def rag_list_communities_endpoint(self, request: Request):
+    """List detected communities."""
+    if not self.agent or not self.agent.memory_engine:
+        return {"status": "ok", "communities": []}
+    try:
+        async with self.agent.memory_engine.pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, community_id, entity_count, summary, updated_at
+                   FROM rag_communities ORDER BY entity_count DESC LIMIT 50"""
+            )
+            communities = [dict(row) for row in rows]
+            for c in communities:
+                c["updated_at"] = str(c["updated_at"])
+        return {"status": "ok", "communities": communities}
+    except Exception as e:
+        return error_response(str(e), 500)
+
+async def rag_status_endpoint(self, request: Request):
+    """Get RAG system statistics."""
+    if not self.agent or not self.agent.memory_engine:
+        return {"status": "ok", "initialized": False}
+    try:
+        async with self.agent.memory_engine.pg_pool.acquire() as conn:
+            doc_count = await conn.fetchval("SELECT COUNT(*) FROM rag_documents")
+            chunk_count = await conn.fetchval("SELECT COUNT(*) FROM rag_chunks")
+            comm_count = await conn.fetchval("SELECT COUNT(*) FROM rag_communities")
+            total_text = await conn.fetchval(
+                "SELECT COALESCE(SUM(LENGTH(text)), 0) FROM rag_chunks"
+            )
+        return {
+            "status": "ok", "initialized": True,
+            "document_count": doc_count,
+            "chunk_count": chunk_count,
+            "community_count": comm_count,
+            "total_chars": total_text,
+        }
+    except Exception as e:
+        return {"status": "ok", "initialized": False, "error": str(e)}
+
 
     async def agent_events_ws(self, websocket: WebSocket):
         await websocket.accept()

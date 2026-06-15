@@ -1,7 +1,64 @@
 import copy
 import hashlib
 import re
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+
+
+@dataclass
+class Entity:
+    id: str
+    entity_type: str
+    content: str
+    metadata: dict = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "entity_type": self.entity_type,
+            "content": self.content,
+            "metadata": self.metadata,
+            "timestamp": self.timestamp,
+        }
+
+    def to_json(self) -> dict:
+        data = self.to_dict()
+        data["timestamp"] = datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat()
+        return data
+
+
+@dataclass
+class Relation:
+    source_id: str
+    target_id: str
+    relation_type: str
+    metadata: dict = field(default_factory=dict)
+
+
+class Ontology:
+    def __init__(self):
+        self.entities: dict[str, Entity] = {}
+        self.relations: list[Relation] = []
+        self._relation_index: dict[tuple[str, str], list[Relation]] = {}
+
+    def add_entity(self, entity_id: str, entity_type: str, content: str, metadata: dict = None) -> Entity:
+        entity = Entity(entity_id, entity_type, content, metadata or {})
+        self.entities[entity_id] = entity
+        return entity
+
+    def add_relation(self, source_id: str, target_id: str, relation_type: str, metadata: dict = None) -> Relation:
+        relation = Relation(source_id, target_id, relation_type, metadata or {})
+        self.relations.append(relation)
+        self._relation_index.setdefault((source_id, relation_type), []).append(relation)
+        return relation
+
+    def find_relations(self, source_id: str, relation_type: str = None) -> list[Relation]:
+        if relation_type is not None:
+            return list(self._relation_index.get((source_id, relation_type), []))
+        return [relation for relation in self.relations if relation.source_id == source_id]
 
 
 DEFAULT_MEMORY_ONTOLOGY = {
@@ -101,6 +158,27 @@ DEFAULT_MEMORY_ONTOLOGY = {
             "id": "alternative",
             "label": "Alternative",
             "description": "An option considered but not chosen in a decision."
+        },
+
+        {
+            "id": "rag_entity",
+            "label": "RAGEntity",
+            "description": "A named entity extracted from RAG document ingestion."
+        },
+        {
+            "id": "document",
+            "label": "Document",
+            "description": "A document ingested into the RAG knowledge base."
+        },
+        {
+            "id": "community",
+            "label": "Community",
+            "description": "A community of related entities detected by graph analysis."
+        },
+        {
+            "id": "memory_card",
+            "label": "MemoryCard",
+            "description": "A dehydrated memory card produced by the dialogue dehydrator pipeline."
         }
     ],
     "relation_types": [
@@ -222,6 +300,70 @@ DEFAULT_MEMORY_ONTOLOGY = {
             "description": "Two decisions are in conflict (different owners chose different options for the same topic).",
             "source_type": "decision",
             "target_type": "decision"
+        },
+
+        {
+            "id": "rag_mentions",
+            "label": "rag_mentions",
+            "description": "A RAG entity is mentioned in a document chunk.",
+            "source_type": "rag_entity",
+            "target_type": "document"
+        },
+        {
+            "id": "similar_to",
+            "label": "similar_to",
+            "description": "A memory is semantically similar to another memory (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "elaborates",
+            "label": "elaborates",
+            "description": "A memory elaborates or expands on another memory (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "supports",
+            "label": "supports",
+            "description": "A memory provides supporting evidence for a claim or another memory (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "contradicts",
+            "label": "contradicts",
+            "description": "A memory contradicts or challenges another memory (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "causes",
+            "label": "causes",
+            "description": "A memory represents a cause of another memory (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "precedes",
+            "label": "precedes",
+            "description": "A memory temporally precedes another memory (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "part_of",
+            "label": "part_of",
+            "description": "A memory is a part or component of a larger memory structure (A-MEM link).",
+            "source_type": "memory",
+            "target_type": "memory"
+        },
+        {
+            "id": "contains_chunk",
+            "label": "contains_chunk",
+            "description": "A document contains a text chunk.",
+            "source_type": "document",
+            "target_type": "document"
         }
     ],
     "hyperedge_types": [

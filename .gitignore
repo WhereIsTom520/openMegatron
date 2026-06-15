@@ -14,6 +14,8 @@ pysrc/workspace/
 
 # Runtime state, logs, screenshots, and local process files
 .runtime/
+.trajectory/
+outputs/
 log/
 logs/
 *.log
@@ -47,6 +49,7 @@ Thumbs.db
 /patch_*.py
 /fix_*.py
 /paper_*.tex
+/start.bat.bak-old-launcher
 /top_test_output.json
 /venues_check.json
 /skill_rollbacks.json

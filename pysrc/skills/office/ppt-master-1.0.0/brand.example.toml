@@ -1,0 +1,21 @@
+# Brand template for PPT Master
+# Copy this file and customize for your organization.
+# Reference it with: brand_config = "path/to/brand.toml"
+# Or place it at pysrc/skills/office/ppt-master-1.0.0/brand.toml
+
+[brand]
+# Company/organization name
+company = ""
+
+# Logo path (PNG recommended, placed top-right on each slide)
+# logo = "assets/logo.png"
+
+# Custom fonts
+# font_title = "Montserrat"
+# font_body = "Source Sans Pro"
+
+# Primary brand color (hex)
+# primary = "#1a56db"
+
+# Footer text (appears on every content slide)
+# footer = "© 2026 Company Name  |  Confidential"

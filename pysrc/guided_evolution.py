@@ -86,18 +86,44 @@ class GuidedEvolution:
 
     LIGHTWEIGHT_MODELS = {"gpt-4o-mini", "gpt-3.5-turbo", "gemini-2.0-flash-lite", "claude-3-haiku", "llama-3.1-8b"}
 
-    def __init__(self, model: str = None):
+    def __init__(self, model: str = None, reward_scorer=None, max_generations: int = 10):
         self._model = model or "gpt-4o-mini"
         self._states: Dict[str, EvolutionState] = {}
         self._repair_hook = RepairHook(model=self._model)
         self._predictive_guard = PredictiveGuard()
-        self._exploration_engine = ExplorationEngine()
+        self._exploration_engine = ExplorationEngine(reward_scorer=reward_scorer)
+        self._reward_integration = None  # Set by install_reward_model_into_evolution()
+        self.max_generations = max_generations
+        self.generation = 0
         self._register_default_categories()
         # Lightweight model: start at REACTIVE, cap at PREDICTIVE (no exploration)
         model_lower = (self._model or "").lower()
         if any(m in model_lower for m in self.LIGHTWEIGHT_MODELS):
             for state in self._states.values():
                 state.max_level = EvolutionLevel.PREDICTIVE
+
+    def _mutate(self, seed: str) -> str:
+        """Simple deterministic mutation used by the legacy sync API."""
+        text = str(seed)
+        return f"{text} :: variant-{self.generation + 1}"
+
+    def evolve(self, seed: str, fitness_fn, target_fitness: float = 1.0):
+        """Legacy synchronous evolution loop."""
+        current = seed
+        best = current
+        best_score = float("-inf")
+        self.generation = 0
+        for generation in range(1, self.max_generations + 1):
+            self.generation = generation
+            candidate = self._mutate(current)
+            score = float(fitness_fn(candidate))
+            if score > best_score:
+                best = candidate
+                best_score = score
+            if score >= target_fitness:
+                return candidate
+            current = candidate
+        return best if best_score >= target_fitness else None
 
     def _register_default_categories(self) -> None:
         for cat in ("research", "code", "media", "monitoring", "general"):
@@ -207,10 +233,39 @@ class GuidedEvolution:
         return result
 
     async def _maybe_promote(self, state: EvolutionState) -> None:
-        """Check if the category should be promoted to the next level."""
+        """Check if the category should be promoted to the next level.
+
+        If a learned reward model is available via _reward_integration,
+        uses model-based decision instead of hardcoded thresholds.
+        """
         if state.level == EvolutionLevel.AUTONOMOUS:
             return
 
+        # Use learned reward model if available
+        if self._reward_integration is not None:
+            try:
+                if self._reward_integration.should_promote(state):
+                    old_level = state.level
+                    if state.level == EvolutionLevel.REACTIVE:
+                        state.level = EvolutionLevel.PREDICTIVE
+                        state.pre_checks_enabled = True
+                    elif state.level == EvolutionLevel.PREDICTIVE and state.max_level.value > EvolutionLevel.PREDICTIVE.value:
+                        state.level = EvolutionLevel.EXPLORATION
+                        state.exploration_enabled = True
+                    elif state.level == EvolutionLevel.EXPLORATION and state.max_level.value > EvolutionLevel.EXPLORATION.value:
+                        state.level = EvolutionLevel.AUTONOMOUS
+                    if state.level != old_level:
+                        state.last_evolution_promotion = time.time()
+                        logger.info(
+                            "Evolution promoted %s: %s -> %s (model-based, success_rate=%.2f, executions=%d)",
+                            state.category, old_level.name, state.level.name,
+                            state.success_rate, state.total_executions,
+                        )
+                return
+            except Exception:
+                logger.debug("Model-based promotion failed, falling back to thresholds", exc_info=True)
+
+        # Fallback: hardcoded thresholds
         thresholds = self.PROMOTION_THRESHOLDS.get(state.level)
         if not thresholds:
             return

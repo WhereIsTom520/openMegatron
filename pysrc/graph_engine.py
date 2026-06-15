@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections import deque
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,73 @@ logger = logging.getLogger(__name__)
 class GraphEngine:
     """Neo4j-backed graph engine for native traversals."""
 
-    def __init__(self, neo4j_driver, pg_pool=None):
+    def __init__(self, neo4j_driver=None, pg_pool=None):
         self._driver = neo4j_driver
         self._pg_pool = pg_pool
         self._indexes_created = False
+        self._nodes: dict[str, dict] = {}
+        self._edges: dict[str, dict[str, dict]] = {}
+        self._entity_index: dict[str, str] = {}
+
+    def add_node(self, node_id: str, **attrs):
+        self._nodes[node_id] = dict(attrs)
+        name = attrs.get("name")
+        if name:
+            self._entity_index[str(name)] = node_id
+
+    def get_node(self, node_id: str) -> Optional[dict]:
+        return self._nodes.get(node_id)
+
+    def add_edge(self, source_id: str, target_id: str, relation: str = "related", **attrs):
+        self._nodes.setdefault(source_id, {})
+        self._nodes.setdefault(target_id, {})
+        self._edges.setdefault(source_id, {})[target_id] = {"relation": relation, **attrs}
+
+    def get_neighbors(self, node_id: str) -> list[str]:
+        return list(self._edges.get(node_id, {}).keys())
+
+    def shortest_path(self, source_id: str, target_id: str) -> Optional[list[str]]:
+        if source_id not in self._nodes or target_id not in self._nodes:
+            return None
+        queue = deque([(source_id, [source_id])])
+        seen = {source_id}
+        while queue:
+            current, path = queue.popleft()
+            if current == target_id:
+                return path
+            for neighbor in self.get_neighbors(current):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        return None
+
+    def find_by_entity(self, name: str) -> Optional[str]:
+        return self._entity_index.get(name)
+
+    def bfs_from(self, node_id: str, max_depth: int = 1) -> list[str]:
+        if node_id not in self._nodes:
+            return []
+        reached = []
+        queue = deque([(node_id, 0)])
+        seen = {node_id}
+        while queue:
+            current, depth = queue.popleft()
+            reached.append(current)
+            if depth >= max_depth:
+                continue
+            for neighbor in self.get_neighbors(current):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append((neighbor, depth + 1))
+        return reached
+
+    @property
+    def node_count(self) -> int:
+        return len(self._nodes)
+
+    @property
+    def edge_count(self) -> int:
+        return sum(len(targets) for targets in self._edges.values())
 
     # ── Schema initialization ──────────────────────────
 
@@ -40,7 +104,11 @@ class GraphEngine:
         async with self._driver.session() as session:
             # Constraints
             for label in ["OntologyNode", "Paper", "Author", "Venue", "Topic",
-                          "Skill", "Decision", "Owner", "Memory", "Evidence"]:
+                          "Skill", "Decision", "Owner", "Memory", "Evidence",
+                          "Claim", "Artifact", "Entity", "Alternative",
+                          "LiteratureReview", "Project", "Session", "Scope",
+                          "HyperEdge", "Tool", "ConversationSession", "MemoryRecord",
+                          "RAGEntity", "Document", "Community", "MemoryCard"]:
                 try:
                     await session.run(
                         f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
@@ -67,9 +135,13 @@ class GraphEngine:
             "topic": "Topic", "skill": "Skill", "tool": "Tool",
             "decision": "Decision", "owner": "Owner", "memory": "Memory",
             "evidence": "Evidence", "claim": "Claim", "artifact": "Artifact",
-            "entity": "Entity", "alternative": "Alternative",
+            "entity": "Entity",
+            "rag_entity": "RAGEntity", "alternative": "Alternative",
             "literature_review": "LiteratureReview",
             "project": "Project", "session": "Session",
+            "scope": "Scope", "hyperedge": "HyperEdge",
+            "document": "Document", "community": "Community",
+            "memory_card": "MemoryCard",
         }
         neo_label = label_map.get(kind, "OntologyNode")
 
@@ -314,8 +386,11 @@ class GraphEngine:
 
 
 def _safe_rel_type(relation: str) -> str:
-    """Convert a relation name to a Neo4j-safe relationship type."""
+    """Convert a relation name to a Neo4j-safe relationship type.
+
+    Preserves the original case to match ontology relation IDs exactly.
+    """
     # Replace non-alphanumeric chars with underscore
     import re
-    safe = re.sub(r'[^a-zA-Z0-9]', '_', relation).strip('_').upper()
-    return safe or "RELATED_TO"
+    safe = re.sub(r'[^a-zA-Z0-9]', '_', relation).strip('_')
+    return safe or "related"

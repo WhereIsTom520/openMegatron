@@ -26,7 +26,7 @@ parameters:
       type: array
       items:
         type: string
-      description: Sections to include (for generate_draft). Default: all standard sections.
+      description: "Sections to include (for generate_draft). Default: all standard sections."
     abstract_only:
       type: boolean
       description: Generate only abstract (for quick summary).

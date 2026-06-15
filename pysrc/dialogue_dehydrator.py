@@ -698,7 +698,33 @@ class KnowledgePipeline:
             dp_prompt = "分析状态转变。若无转变 has_shift=false。"
             state.decision_point = await self._call_llm(dp_prompt, "\n".join(state.core_sentences), DecisionPoint)
             state.current_stage = PipelineStage.EXTRACTION
-            sys_prompt = "提取知识图谱。约束：不超过10条边。"
+            sys_prompt = (
+    "Extract a knowledge graph from the text using ONLY the following ontology types.\n\n"
+    "NODE TYPES (use exactly these IDs):\n"
+    "  entity - A named concept, person, tool, paper, file, model, or object.\n"
+    "  memory - An episodic long-term memory item.\n"
+    "  topic - A thematic grouping.\n"
+    "  claim - A conclusion, judgment, or distilled statement.\n"
+    "  evidence - A source, result, citation, log, or verification artifact.\n"
+    "  artifact - A generated file, answer, video, document, or code change.\n\n"
+    "EDGE TYPES (use exactly these IDs):\n"
+    "  mentions - memory -> entity (a memory mentions an entity)\n"
+    "  topic - memory -> topic (a memory belongs to a topic)\n"
+    "  related - general associative link between any nodes\n"
+    "  produces - any node -> artifact\n"
+    "  uses - any node uses a skill, tool, or evidence\n"
+    "  verified_by - claim -> evidence\n"
+    "  supports - memory -> claim (memory supports a claim)\n"
+    "  contradicts - memory -> claim (memory contradicts a claim)\n"
+    "  part_of - memory -> memory (part-whole relationship)\n"
+    "  causes - memory -> memory (causal relationship)\n\n"
+    "RULES:\n"
+    "1. Node IDs must use the format kind:label (e.g., entity:Python, memory:user_asked_about_X).\n"
+    "2. Use ONLY the node types and edge types listed above.\n"
+    "3. Maximum 10 edges.\n"
+    "4. Each node must have a descriptive label property.\n"
+    "Return JSON with nodes and edges arrays."
+)
             entities_data = await self._call_llm('提取最多5个核心实体，返回 JSON: {"entities": ["A", "B"]}', state.resolved_text)
             linked_entities = await self._link_entities(entities_data.get("entities", []))
             context_knowledge = await self._retrieve_context(linked_entities, state.resolved_text, state.owner_id)
@@ -767,101 +793,165 @@ class KnowledgePipeline:
         }
 
     async def _write_graph_payload_to_neo4j(self, payload: Dict[str, Any]):
+        """Write graph payload to Neo4j using ontology-aligned methods.
+
+        Node IDs use canonical kind:sha1_12 format. Nodes get proper
+        Neo4j labels from the ontology. Edges use ontology-defined
+        relation types in lowercase.
+        """
         if not self.neo4j_driver:
             raise RuntimeError("Neo4j unavailable")
         try:
-            nodes_data = [
-                {
-                    "id": n.get("id"),
-                    "label": re.sub(r'[^a-zA-Z0-9]', '', str(n.get("label", ""))) or "ENTITY",
-                    "props": n.get("props", {})
-                }
-                for n in payload.get("nodes", [])
-                if n.get("id")
-            ]
-            edges_data = [
-                {
-                    "src": e.get("src"),
-                    "tgt": e.get("tgt"),
-                    "type": re.sub(r'[^a-zA-Z0-9]', '', str(e.get("type", ""))) or "RELATION",
-                    "props": e.get("props", {}),
-                    "sid": payload.get("dialogue_id"),
-                    "oid": payload.get("owner_id"),
-                    "scp": payload.get("scope")
-                }
-                for e in payload.get("edges", [])
-                if e.get("src") and e.get("tgt")
-            ]
+            from memory_ontology import ontology_node_id
+
+            def _parse_node_id(raw_id):
+                if ':' in str(raw_id):
+                    parts = str(raw_id).split(':', 1)
+                    kind = parts[0].strip().lower()
+                    label = parts[1].strip()
+                    valid = {
+                        'entity', 'memory', 'topic', 'claim', 'evidence',
+                        'artifact', 'skill', 'tool', 'paper', 'author',
+                        'venue', 'project', 'session', 'decision', 'alternative',
+                        'rag_entity', 'document', 'community', 'memory_card',
+                        'owner', 'scope', 'hyperedge', 'literature_review',
+                    }
+                    return (kind if kind in valid else 'entity', label)
+                return ('entity', str(raw_id))
+
+            neo_labels = {
+                "entity": "Entity", "memory": "Memory", "topic": "Topic",
+                "claim": "Claim", "evidence": "Evidence", "artifact": "Artifact",
+                "skill": "Skill", "tool": "Tool", "paper": "Paper",
+                "author": "Author", "venue": "Venue", "project": "Project",
+                "session": "Session", "decision": "Decision",
+                "alternative": "Alternative", "rag_entity": "RAGEntity",
+                "document": "Document", "community": "Community",
+                "memory_card": "MemoryCard", "owner": "Owner",
+                "scope": "Scope", "hyperedge": "HyperEdge",
+                "literature_review": "LiteratureReview",
+            }
+
+            type_map = {
+                "mentions": "mentions", "mention": "mentions",
+                "topic": "topic", "related": "related",
+                "produces": "produces", "produce": "produces",
+                "uses": "uses", "use": "uses",
+                "verified_by": "verified_by", "verifies": "verified_by",
+                "supports": "supports", "support": "supports",
+                "contradicts": "contradicts", "contradict": "contradicts",
+                "causes": "causes", "cause": "causes",
+                "part_of": "part_of", "partof": "part_of",
+                "similar_to": "similar_to", "similar": "similar_to",
+                "elaborates": "elaborates", "elaborate": "elaborates",
+                "precedes": "precedes", "precede": "precedes",
+                "belongs_to": "belongs_to", "belongsto": "belongs_to",
+            }
+
             async with self.neo4j_driver.session() as session:
-                has_apoc = await self._check_apoc_procedure(session)
-                for node in nodes_data:
+                # Write nodes
+                for n in payload.get("nodes", []):
+                    raw_id = n.get("id", "")
+                    if not raw_id:
+                        continue
+                    kind, label = _parse_node_id(raw_id)
+                    node_id = ontology_node_id(kind, label)
+                    props = dict(n.get("props", {}))
+                    props.setdefault("label", label)
+                    props.setdefault("kind", kind)
+                    props.setdefault("source", "dehydrator")
+                    props.setdefault("dialogue_id", payload.get("dialogue_id", ""))
+                    props.setdefault("owner_id", payload.get("owner_id", ""))
+                    neo_label = neo_labels.get(kind, "OntologyNode")
                     try:
                         await session.run(
-                            f"MERGE (n:`{node['label']}` {{id: $id}}) ON CREATE SET n = $props ON MATCH SET n += $props",
-                            id=node["id"], props=node["props"]
+                            f"MERGE (n:{neo_label}:OntologyNode {{id: $id}}) "
+                            f"ON CREATE SET n = $props ON MATCH SET n += $props",
+                            id=node_id, props=props,
                         )
                     except Exception as e:
-                        logger.warning(f"Node merge failed for {node['id']}: {e}")
-                for edge in edges_data:
+                        logger.warning(f"Node merge failed for {node_id}: {e}")
+
+                # Write edges
+                for e in payload.get("edges", []):
+                    src_raw = e.get("src", "")
+                    tgt_raw = e.get("tgt", "")
+                    if not src_raw or not tgt_raw:
+                        continue
+                    src_kind, src_label = _parse_node_id(src_raw)
+                    tgt_kind, tgt_label = _parse_node_id(tgt_raw)
+                    src_id = ontology_node_id(src_kind, src_label)
+                    tgt_id = ontology_node_id(tgt_kind, tgt_label)
+                    raw_type = str(e.get("type", "related")).strip().lower()
+                    rel_type = type_map.get(raw_type, "related")
+                    props = dict(e.get("props", {}))
+                    props.setdefault("dialogue_id", payload.get("dialogue_id", ""))
+                    props.setdefault("owner_id", payload.get("owner_id", ""))
                     try:
-                        if has_apoc:
-                            await session.run(
-                                "MERGE (a {id: $src}) MERGE (b {id: $tgt}) WITH a, b "
-                                "CALL apoc.merge.relationship(a, $type, {session_id: $sid}, $props, b, $props) YIELD rel "
-                                "SET rel += $props",
-                                src=edge["src"], tgt=edge["tgt"], type=edge["type"],
-                                props=edge["props"], sid=edge["sid"]
-                            )
-                        else:
-                            await session.run(
-                                f"MERGE (a {{id: $src}}) MERGE (b {{id: $tgt}}) "
-                                f"MERGE (a)-[r:`{edge['type']}`]->(b) "
-                                f"ON CREATE SET r = $props ON MATCH SET r += $props",
-                                src=edge["src"], tgt=edge["tgt"], props=edge["props"]
+                        await session.run(
+                            f"MATCH (a:OntologyNode {{id: $src_id}}) "
+                            f"MATCH (b:OntologyNode {{id: $tgt_id}}) "
+                            f"MERGE (a)-[r:{rel_type}]->(b) "
+                            f"ON CREATE SET r = $props ON MATCH SET r += $props",
+                            src_id=src_id, tgt_id=tgt_id, props=props,
                         )
                     except Exception as e:
-                        logger.warning(f"Edge merge failed for {edge['src']}->{edge['tgt']}: {e}")
+                        logger.warning(f"Edge merge failed {src_id}->{tgt_id}: {e}")
+
+                # Memory cards → ontology memory nodes
                 card = payload.get("memory_card") or {}
                 for i, sentence in enumerate(payload.get("core_sentences") or []):
-                    memory_id = f"{payload.get('message_id')}_{i}"
+                    memory_id = ontology_node_id(
+                        "memory", f"{payload.get('dialogue_id', '')}_{i}"
+                    )
                     try:
                         await session.run(
                             """
-                            MERGE (m:MemoryCard {id: $id})
-                            SET m.text = $text,
+                            MERGE (m:Memory:OntologyNode {id: $id})
+                            SET m.kind = 'memory',
+                                m.label = $text,
+                                m.text = $text,
                                 m.dialogue_id = $dialogue_id,
                                 m.owner_id = $owner_id,
                                 m.scope = $scope,
                                 m.keywords = $keywords,
                                 m.tags = $tags,
-                                m.context = $context
+                                m.context = $context,
+                                m.source = 'dehydrator'
                             """,
-                            id=memory_id,
-                            text=sentence,
+                            id=memory_id, text=sentence,
                             dialogue_id=payload.get("dialogue_id"),
                             owner_id=payload.get("owner_id"),
                             scope=payload.get("scope"),
                             keywords=card.get("keywords", []),
                             tags=card.get("tags", []),
-                            context=card.get("context", "")
+                            context=card.get("context", ""),
                         )
-                        for entity in list(payload.get("entities") or [])[:8]:
-                            await session.run(
-                                """
-                                MATCH (m:MemoryCard {id: $memory_id})
-                                MERGE (e {id: $entity})
-                                MERGE (m)-[r:MENTIONS]->(e)
-                                SET r.dialogue_id = $dialogue_id
-                                """,
-                                memory_id=memory_id,
-                                entity=entity,
-                                dialogue_id=payload.get("dialogue_id")
-                            )
+                        for entity_raw in list(payload.get("entities") or [])[:8]:
+                            e_kind, e_label = _parse_node_id(str(entity_raw))
+                            entity_id = ontology_node_id(e_kind, e_label)
+                            try:
+                                await session.run(
+                                    """
+                                    MATCH (m:OntologyNode {id: $memory_id})
+                                    MERGE (e:Entity:OntologyNode {id: $entity_id})
+                                    ON CREATE SET e.kind = 'entity', e.label = $entity_label, e.source = 'dehydrator'
+                                    MERGE (m)-[r:mentions]->(e)
+                                    ON CREATE SET r.dialogue_id = $dialogue_id
+                                    ON MATCH SET r.dialogue_id = $dialogue_id
+                                    """,
+                                    memory_id=memory_id, entity_id=entity_id,
+                                    entity_label=e_label,
+                                    dialogue_id=payload.get("dialogue_id"),
+                                )
+                            except Exception as ex:
+                                logger.debug(f"Mentions edge failed {memory_id}->{entity_id}: {ex}")
                     except Exception as e:
-                        logger.warning(f"MemoryCard graph merge failed for {memory_id}: {e}")
+                        logger.warning(f"Memory node merge failed for {memory_id}: {e}")
         except Exception as e:
             logger.error(f"Neo4j write failed: {e}", exc_info=True)
             raise
+
 
     async def _write_to_neo4j(self, state: PipelineState):
         if not self.neo4j_driver or (not state.extracted_graph and not state.core_sentences):

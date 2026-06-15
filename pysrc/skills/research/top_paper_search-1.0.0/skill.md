@@ -36,12 +36,12 @@ parameters:
   required:
     - action
     - query
-    domains:
+  domains:
       type: array
       items:
         type: string
       description: List of venue-policy domains for cross-domain search (e.g., ["ai","nlp","hci"]). Overrides single `domain` when set.
-    venues:
+  venues:
       type: array
       items:
         type: string

@@ -17,9 +17,32 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+class ModelTier(str, Enum):
+    """Backward-compatible public tier enum."""
+
+    LITE = "lite"
+    STANDARD = "standard"
+    ADVANCED = "advanced"
+
+
+TIER_COST = {
+    ModelTier.LITE: 0.3,
+    ModelTier.STANDARD: 1.0,
+    ModelTier.ADVANCED: 3.0,
+}
+
+
+TIER_MODELS = {
+    ModelTier.LITE: ["gpt-4o-mini", "claude-3-haiku", "gemini-2.0-flash-lite"],
+    ModelTier.STANDARD: ["gpt-4.1-mini", "claude-3.5-haiku", "gemini-2.0-flash"],
+    ModelTier.ADVANCED: ["gpt-4.1", "gpt-4o", "claude-3.5-sonnet"],
+}
 
 
 # ═══════════════════════════════════════════════════════

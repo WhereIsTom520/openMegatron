@@ -32,6 +32,52 @@ from repair_hook import RepairIssue
 logger = logging.getLogger(__name__)
 
 
+class PredictiveEngine:
+    """Small in-memory predictor kept for the original engine API."""
+
+    def __init__(self):
+        self._records: list[dict] = []
+        self._feature_vectors: list[set[str]] = []
+
+    def record(self, context: dict, action: str, outcome: str) -> None:
+        record = {"context": context or {}, "action": action, "outcome": outcome}
+        self._records.append(record)
+        self._feature_vectors.append(self._extract_features(record))
+
+    def predict(self, context: dict, limit: int = 3) -> list[dict]:
+        if not self._records:
+            return []
+        query_features = self._extract_features({"context": context or {}})
+        scored = []
+        for record, features in zip(self._records, self._feature_vectors):
+            score = self._compute_similarity(query_features, features)
+            if score > 0:
+                scored.append((score, record))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [
+            {"action": record["action"], "outcome": record["outcome"], "confidence": round(score, 4)}
+            for score, record in scored[:limit]
+        ]
+
+    def _extract_features(self, record: dict) -> set[str]:
+        features: set[str] = set()
+        context = record.get("context", {}) or {}
+        if isinstance(context, dict):
+            for key, value in context.items():
+                features.add(f"{key}:{value}")
+        if record.get("action") is not None:
+            features.add(f"action:{record.get('action')}")
+        if record.get("outcome") is not None:
+            features.add(f"outcome:{record.get('outcome')}")
+        return features
+
+    @staticmethod
+    def _compute_similarity(left: set[str], right: set[str]) -> float:
+        if not left or not right:
+            return 0.0
+        return len(left & right) / len(left | right)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PredictiveGuard
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -296,11 +342,12 @@ class ExplorationEngine:
     This is the "reinforcement learning" analog for the repair loop.
     """
 
-    def __init__(self, llm_client=None, model: str = None):
+    def __init__(self, llm_client=None, model: str = None, reward_scorer=None):
         self._client = llm_client
         self._model = model or "gpt-4o-mini"
         # strategy_name -> { success_count, failure_count, avg_duration, last_score }
         self._strategy_scores: Dict[str, Dict] = {}
+        self._reward_scorer = reward_scorer  # Optional learned reward model
 
     async def explore(
         self,
@@ -387,7 +434,11 @@ class ExplorationEngine:
         return best_strategy, results
 
     def _update_score(self, strategy_name: str, success: bool, duration_ms: float) -> None:
-        """Update the historical score for a strategy."""
+        """Update the historical score for a strategy.
+
+        If a learned reward_scorer is available, uses model prediction
+        as a continuous reward signal instead of binary success/failure.
+        """
         entry = self._strategy_scores.setdefault(strategy_name, {
             "success_count": 0,
             "failure_count": 0,
@@ -395,14 +446,43 @@ class ExplorationEngine:
             "attempts": 0,
             "success_rate": 0.5,
         })
+        if self._reward_scorer is not None:
+            # Use learned model to produce a continuous reward
+            features = {
+                "tool_count": entry["attempts"] + 1,
+                "duration_ms": duration_ms,
+                "has_error_tool": 0 if success else 1,
+                "error_tool_ratio": 0.0 if success else 1.0,
+                "skill_count": 1,
+                "avg_tool_duration": duration_ms,
+                "user_input_len": len(strategy_name),
+                "source_is_claude": 0,
+                "hour_of_day": 12,
+                "stability": entry["success_rate"],
+                "speed": 1.0,
+                "efficiency": 1.0,
+            }
+            try:
+                model_score = self._reward_scorer.score_strategy(strategy_name, features) \
+                    if hasattr(self._reward_scorer, "score_strategy") \
+                    else self._reward_scorer.scorer.predict(features)
+            except Exception:
+                model_score = 0.7 if success else 0.3
+
+            # Blend model score with historical success_rate (exponential moving average)
+            alpha = 0.3  # Weight for model score
+            entry["success_rate"] = alpha * model_score + (1 - alpha) * entry["success_rate"]
+
         if success:
             entry["success_count"] += 1
         else:
             entry["failure_count"] += 1
         entry["total_duration_ms"] += duration_ms
         entry["attempts"] += 1
-        total = entry["success_count"] + entry["failure_count"]
-        entry["success_rate"] = entry["success_count"] / max(total, 1)
+        if self._reward_scorer is None:
+            # Only update from counts when no model is available
+            total = entry["success_count"] + entry["failure_count"]
+            entry["success_rate"] = entry["success_count"] / max(total, 1)
 
     def get_scores(self) -> Dict[str, Dict]:
         """Return current strategy scores for inspection."""

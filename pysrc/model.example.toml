@@ -93,21 +93,21 @@ health_check_interval = 30
 
 [postgresql]
 host = "localhost"
-port = 54320
+port = 5432
 user = "root"
 password = "root"
 database = "root"
 
 [postgres]
 host = "localhost"
-port = 54320
+port = 5432
 user = "root"
 password = "root"
 database = "root"
 
 [pgvector]
 host = "localhost"
-port = 54320
+port = 5432
 user = "root"
 password = "root"
 database = "root"

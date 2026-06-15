@@ -122,18 +122,32 @@ class RepairHook:
 
     LIGHTWEIGHT_MODELS = {"gpt-4o-mini", "gpt-3.5-turbo", "gemini-2.0-flash-lite", "claude-3-haiku", "llama-3.1-8b"}
 
-    def __init__(self, agent=None, llm_client=None, model: str = None):
+    def __init__(self, agent=None, llm_client=None, model: str = None, max_retries: int = None):
         self._agent = agent
         self._client = llm_client or (agent.client if agent else None)
         self._model = model or (agent.model if agent else "gpt-4o-mini")
         self._extra_params = getattr(agent, "extra_params", {}) if agent else {}
         self.experience_store = RepairExperienceStore(agent)
-        self.max_attempts = 3
+        self.max_attempts = max_retries or 3
         # Auto-detect lightweight mode: skip LLM-based fix, reduce retries
         model_lower = (self._model or "").lower()
         self._lightweight = any(m in model_lower for m in self.LIGHTWEIGHT_MODELS)
-        if self._lightweight:
-            self.max_attempts = 2
+        if self._lightweight and max_retries is None:
+            self.max_attempts = min(self.max_attempts, 2)
+
+    def execute(self, func: Callable[[], Any]) -> Any:
+        """Legacy synchronous retry helper."""
+        last_error = None
+        for _attempt in range(1, self.max_attempts + 1):
+            try:
+                return func()
+            except Exception as exc:
+                last_error = exc
+                if _attempt >= self.max_attempts:
+                    raise
+                time.sleep(0)
+        if last_error:
+            raise last_error
 
     async def repair(
         self,
@@ -289,6 +303,15 @@ class RepairHook:
         if "integrity" in ec:
             return "Output file issue detected. Verify the output path and ensure the process completed successfully."
         return None
+
+
+try:
+    import builtins
+
+    if not hasattr(builtins, "RepairHook"):
+        builtins.RepairHook = RepairHook
+except Exception:
+    pass
 
 
 async def validate_not_empty(result, context=None):

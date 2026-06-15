@@ -584,6 +584,17 @@ class MemoryService:
             logger.error(f"Workflow pattern search failed: {e}")
             return []
 
+    async def _execute_sql(self, sql: str, *args):
+        """Execute arbitrary SQL on the pg pool. Used by RAG pipeline."""
+        async with self.pg_pool.acquire() as conn:
+            return await conn.execute(sql, *args)
+
+    async def _fetch_sql(self, sql: str, *args):
+        """Execute a SELECT and return rows."""
+        async with self.pg_pool.acquire() as conn:
+            return await conn.fetch(sql, *args)
+
+
     async def update_workflow_pattern_stats(self, pattern_id: str, success_delta: int = 0, failure_delta: int = 0, notes: str = None):
         if not pattern_id:
             return
@@ -621,6 +632,12 @@ class MemoryService:
             logger.error(f"Workflow stats update failed: {e}")
 
     async def _sync_workflow_graph(self, pattern_id: str, goal_type: str, chain: List[Any], consumes: Any, produces: Any):
+        """Sync workflow patterns to Neo4j as a non-ontology operational graph.
+
+        NOTE: WorkflowPattern nodes and USES/CAN_FEED edges are operational
+        types for agent routing. They are intentionally separate from the
+        memory ontology and are not subject to ontology validation.
+        """
         if not self.neo4j_driver:
             return
         try:
@@ -761,6 +778,16 @@ class MemoryService:
     async def _upsert_ontology_node(self, conn, node_id, kind, label, properties=None):
         import json as _j
         d = chr(36)
+        # Ontology validation (warn on unknown kinds, never block)
+        try:
+            from memory_ontology import default_memory_ontology
+            onto = default_memory_ontology()
+            known_kinds = {nt["id"] for nt in onto["node_types"]}
+            if kind not in known_kinds:
+                logger.warning(f"Ontology node kind '{kind}' not in ontology. Known: {sorted(known_kinds)}")
+        except Exception:
+            pass
+
         await conn.execute(
             "INSERT INTO ontology_nodes (id, kind, label, properties, created_at, updated_at) VALUES ("
             + d + "1, " + d + "2, " + d + "3, " + d + "4::jsonb, NOW(), NOW())"
@@ -776,6 +803,16 @@ class MemoryService:
         """Write a memory_link to PostgreSQL AND mirror to Neo4j."""
         import json as _j
         d = chr(36)
+        # Ontology validation
+        try:
+            from memory_ontology import default_memory_ontology
+            onto = default_memory_ontology()
+            known_rels = {rt["id"] for rt in onto["relation_types"]}
+            if relation not in known_rels:
+                logger.debug(f"Relation '{relation}' not in ontology (known: {sorted(known_rels)})")
+        except Exception:
+            pass
+
         await conn.execute(
             "INSERT INTO memory_links (source_id, target_id, relation, confidence, metadata, created_at) VALUES ("
             + d + "1, " + d + "2, " + d + "3, " + d + "4, " + d + "5::jsonb, NOW())"
@@ -799,8 +836,9 @@ class MemoryService:
         )
 
     def ontology_node_id(self, kind, label):
-        raw = f"onto:{kind}:{label}"
-        return f"onto_{hashlib.sha256(raw.encode()).hexdigest()[:24]}"
+        """Generate a stable ontology node ID using the canonical format."""
+        from memory_ontology import ontology_node_id as _onto_id
+        return _onto_id(kind, label)
 
     async def query_ontology_nodes(self, kind=None, limit=200):
         d = chr(36)
@@ -959,29 +997,44 @@ class MemoryDatabases:
         return f"redis://{host}:{port}/{db}"
 
     async def connect_pg(self):
-        try:
-            pg_cfg = self.cfg.get("postgres", {})
-            pg_dsn = pg_cfg.get("dsn") or f"postgresql://{pg_cfg.get('user', 'postgres')}:{pg_cfg.get('password', 'password')}@{pg_cfg.get('host', 'localhost')}:{pg_cfg.get('port', 5432)}/{pg_cfg.get('database', 'postgres')}"
-            self.pg_pool = await asyncpg.create_pool(pg_dsn, min_size=1, max_size=int(pg_cfg.get("pool_max_size", 10)))
-            async with self.pg_pool.acquire() as conn:
-                await self._init_schema(conn)
-            # Initialize graph engine (Neo4j) and cache engine (Redis)
-            from graph_engine import GraphEngine
-            from cache_engine import CacheEngine
-            self.graph_engine = GraphEngine(self.neo4j, self.pg_pool)
-            self.cache_engine = CacheEngine(self.redis)
-            if self.neo4j:
-                await self.graph_engine.ensure_schema()
-                logger.info("GraphEngine (Neo4j) initialized")
-            logger.info("CacheEngine (Redis) initialized")
-            # Pass all three engines to MemoryService
-            self.service = MemoryService(
-                self.pg_pool, self.neo4j, self.redis, self.cfg, self.embedder,
-                graph_engine=self.graph_engine, cache_engine=self.cache_engine,
-            )
-        except Exception as e:
-            logger.critical(f"Postgres connect critical failed: {e}")
-            raise CriticalDependencyError("Database connection failed")
+        max_retries = int(os.environ.get("MEGATRON_PG_RETRY_MAX", "10"))
+        retry_delay = float(os.environ.get("MEGATRON_PG_RETRY_DELAY", "3.0"))
+        last_error = None
+        pg_cfg = self.cfg.get("postgres", {})
+        pg_dsn = pg_cfg.get("dsn") or f"postgresql://{pg_cfg.get('user', 'postgres')}:{pg_cfg.get('password', 'password')}@{pg_cfg.get('host', 'localhost')}:{pg_cfg.get('port', 5432)}/{pg_cfg.get('database', 'postgres')}"
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                self.pg_pool = await asyncpg.create_pool(pg_dsn, min_size=1, max_size=int(pg_cfg.get("pool_max_size", 10)))
+                async with self.pg_pool.acquire() as conn:
+                    await self._init_schema(conn)
+                # Initialize graph engine (Neo4j) and cache engine (Redis)
+                from graph_engine import GraphEngine
+                from cache_engine import CacheEngine
+                self.graph_engine = GraphEngine(self.neo4j, self.pg_pool)
+                self.cache_engine = CacheEngine(self.redis)
+                if self.neo4j:
+                    await self.graph_engine.ensure_schema()
+                    logger.info("GraphEngine (Neo4j) initialized")
+                logger.info("CacheEngine (Redis) initialized")
+                # Pass all three engines to MemoryService
+                self.service = MemoryService(
+                    self.pg_pool, self.neo4j, self.redis, self.cfg, self.embedder,
+                    graph_engine=self.graph_engine, cache_engine=self.cache_engine,
+                )
+                logger.info(f"PostgreSQL connected (attempt {attempt}/{max_retries})")
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Postgres connection attempt {attempt}/{max_retries} failed: {e}. "
+                        f"Retrying in {retry_delay}s..."
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.critical(f"Postgres connect failed after {max_retries} attempts: {e}")
+        raise CriticalDependencyError(f"Database connection failed after {max_retries} retries: {last_error}")
 
     async def _init_schema(self, conn):
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -1202,6 +1255,67 @@ class MemoryDatabases:
             """
         )
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_member_node ON memory_hyperedge_members(node_id);")
+
+        # ── RAG tables (Tri-Store Hybrid RAG) ────────────────────
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_documents (
+                id VARCHAR PRIMARY KEY,
+                title TEXT,
+                source TEXT,
+                file_type VARCHAR(32),
+                owner_id VARCHAR DEFAULT 'shared',
+                scope VARCHAR DEFAULT 'shared',
+                metadata JSONB DEFAULT '{}'::jsonb,
+                chunk_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_docs_owner ON rag_documents(owner_id, scope);")
+
+        await conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                id VARCHAR PRIMARY KEY,
+                doc_id VARCHAR REFERENCES rag_documents(id) ON DELETE CASCADE,
+                chunk_index INTEGER,
+                text TEXT,
+                embedding vector({self.embed_dim}),
+                metadata JSONB DEFAULT '{{}}'::jsonb,
+                owner_id VARCHAR DEFAULT 'shared',
+                scope VARCHAR DEFAULT 'shared',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc ON rag_chunks(doc_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_owner ON rag_chunks(owner_id, scope);")
+        try:
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding ON rag_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200);"
+            )
+        except Exception:
+            try:
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding ON rag_chunks USING ivfflat (embedding vector_cosine_ops);"
+                )
+            except Exception:
+                pass
+
+        await conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS rag_communities (
+                id VARCHAR PRIMARY KEY,
+                community_id INTEGER,
+                entity_count INTEGER DEFAULT 0,
+                summary TEXT,
+                embedding vector({self.embed_dim}),
+                metadata JSONB DEFAULT '{{}}'::jsonb,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
 
     async def close(self):
         if self.redis:

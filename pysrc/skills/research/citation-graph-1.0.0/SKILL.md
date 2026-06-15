@@ -25,9 +25,6 @@ parameters:
     readings:
       type: array
       description: Structured reading list from paper_reader. Automatically converted to papers for graph building.
-readings:
-      type: array
-      description: Structured reading list from paper_reader. Automatically converted to papers for graph building.
     max_nodes:
       type: integer
       description: Maximum nodes in the graph (default 50).

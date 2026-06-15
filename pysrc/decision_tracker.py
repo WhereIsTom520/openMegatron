@@ -63,7 +63,7 @@ def _onto_id(kind: str, label: str) -> str:
 def _decision_id(owner_id: str, topic: str, chosen: str) -> str:
     """Stable decision ID — same owner+topic+chosen → same id."""
     payload = f"{owner_id}|{topic}|{chosen}"
-    digest = hashlib.sha1(payload.encode()).hexdigest()[:16]
+    digest = hashlib.sha1(payload.encode()).hexdigest()[:12]
     return f"decision:{digest}"
 
 
