@@ -39,9 +39,9 @@ TIER_COST = {
 
 
 TIER_MODELS = {
-    ModelTier.LITE: ["gpt-4o-mini", "claude-3-haiku", "gemini-2.0-flash-lite"],
-    ModelTier.STANDARD: ["gpt-4.1-mini", "claude-3.5-haiku", "gemini-2.0-flash"],
-    ModelTier.ADVANCED: ["gpt-4.1", "gpt-4o", "claude-3.5-sonnet"],
+    ModelTier.LITE: ["gpt-4o-mini", "qwen2.5-coder-7b", "gemini-2.0-flash-lite"],
+    ModelTier.STANDARD: ["gpt-4.1-mini", "qwen-plus", "gemini-2.0-flash"],
+    ModelTier.ADVANCED: ["gpt-4.1", "gpt-4o", "deepseek-reasoner"],
 }
 
 
@@ -310,7 +310,7 @@ def classify_from_name_fast(model_name: str) -> Optional[str]:
 
     # Mid-tier models → medium (check SECOND — more specific than premium)
     mid_tier = {"gpt-4o-mini", "gpt-4.1-mini", "o4-mini",
-                "claude-3-haiku", "claude-3.5-haiku",
+                "qwen2.5-coder-7b", "qwen-plus",
                 "gemini-1.5-flash", "gemini-2.0-flash",
                 "qwen-plus", "qwen-turbo", "moonshot-v1", "step-2",
                 "mistral-small", "mistral-medium",
@@ -321,7 +321,7 @@ def classify_from_name_fast(model_name: str) -> Optional[str]:
 
     # Premium / frontier models → large (check LAST since substrings like "gpt-4o" match "gpt-4o-mini")
     premium = {"gpt-4o", "gpt-4.1", "gpt-4-turbo", "o3", "o4",
-               "claude-3-opus", "claude-3.5-sonnet", "claude-4",
+               "qwen-max", "deepseek-reasoner", "deepseek-r1",
                "gemini-1.5-pro", "gemini-2.0-pro", "gemini-2.5",
                "deepseek-chat", "deepseek-reasoner", "deepseek-v3", "deepseek-r1",
                "qwen-max", "qwen-long", "mistral-large"}

@@ -84,7 +84,7 @@ class GuidedEvolution:
         },
     }
 
-    LIGHTWEIGHT_MODELS = {"gpt-4o-mini", "gpt-3.5-turbo", "gemini-2.0-flash-lite", "claude-3-haiku", "llama-3.1-8b"}
+    LIGHTWEIGHT_MODELS = {"gpt-4o-mini", "gpt-3.5-turbo", "gemini-2.0-flash-lite", "qwen2.5-coder-7b", "llama-3.1-8b"}
 
     def __init__(self, model: str = None, reward_scorer=None, max_generations: int = 10):
         self._model = model or "gpt-4o-mini"

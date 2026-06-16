@@ -81,18 +81,18 @@ start.bat -FrontendPort 3001
 ## What It Does
 
 - **Agent chat workbench**: web UI plus backend tool execution.
-- **Multi-model support**: OpenAI-compatible APIs, Claude/Opus-style providers, DeepSeek, local llama.cpp, and similar endpoints.
+- **Multi-model support**: OpenAI-compatible APIs, DeepSeek, local llama.cpp, and similar endpoints.
 - **Skill system**: code, research, office, media, and agent-orchestration skill packs.
 - **Long-term memory**: Redis + PostgreSQL/pgvector + Neo4j.
 - **RAG retrieval**: document ingestion, vector search, graph search, and citation-style answers.
 - **Companion-model loop**: collect task traces, train reward/scoring models, improve routing and quality checks.
 - **GUI automation**: screenshot, click, type, scroll, drag, and related computer-control actions.
-- **External log ingestion**: Claude Code, Codex-compatible logs, OpenClaw/Hermes trajectories.
+- **External log ingestion**: External Agent JSONL, external text-agent compatible logs, OpenClaw/Hermes trajectories.
 - **Evaluation scaffolding**: ablation experiments for RAG, memory, and companion AI components.
 
 ## What The Companion Model Means
 
-The companion model is not presented as a full replacement for GPT/Opus. In the current 1.0 release, it is a local learning loop around OpenMegatron:
+The companion model is not presented as a full replacement for cloud models. In the current 1.0 release, it is a local learning loop around OpenMegatron:
 
 1. collect task traces and tool-call outcomes;
 2. train reward/scoring models;

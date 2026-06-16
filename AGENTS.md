@@ -153,6 +153,6 @@ docker-compose up
 ## Git workflow
 
 - Branch: `main` (protected — work in feature branches)
-- Remote: `https://github.com/GodOn514/openMegatron`
+- Remote: `https://github.com/WhereIsTom520/openMegatron`
 - Commits are grouped by logical package (engines, skills, integration, fixes)
 - PR reviews use `/code-review` with findings posted as inline comments

@@ -407,7 +407,7 @@ class SkillRouter:
                 "\u4fee\u590d", "\u8c03\u8bd5", "\u62a5\u9519", "\u91cd\u6784", "\u5355\u5143\u6d4b\u8bd5",
                 "code", "coding", "program", "programmer", "bug", "debug", "fix", "refactor",
                 "implement", "patch", "test", "pytest", "lint", "build", "typescript", "javascript",
-                "python", "frontend", "backend", "claude code", "claudcode"
+                "python", "frontend", "backend", "external_agent code", "externalagentjsonl"
             ],
         }
         category_keywords["research"].extend([

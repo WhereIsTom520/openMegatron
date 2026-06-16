@@ -269,11 +269,11 @@ async def trajectory_list(args) -> int:
     return 0
 
 
-async def trajectory_import_claude(args) -> int:
-    """Parse and import Claude Code transcripts."""
-    from pysrc.claude_code_parser import ClaudeCodeParser
+async def trajectory_import_external_agent(args) -> int:
+    """Parse and import External Agent JSONL transcripts."""
+    from pysrc.external_agent_parser import ExternalAgentParser
     from pysrc.trajectory_store import TrajectoryStore
-    parser = ClaudeCodeParser()
+    parser = ExternalAgentParser()
     input_path = Path(args.input)
     if input_path.is_file():
         turns = parser.parse_file(str(input_path))
@@ -299,7 +299,7 @@ async def trajectory_import_claude(args) -> int:
 
 
 async def trajectory_import(args) -> int:
-    """Import trajectories from Codex, OpenMegatron, or custom JSON/JSONL."""
+    """Import trajectories from External Text Agent, OpenMegatron, or custom JSON/JSONL."""
     from pysrc.trajectory_importer import TrajectoryImporter
     from pysrc.trajectory_store import TrajectoryStore
 
@@ -394,27 +394,27 @@ async def main() -> int:
     traj_list.add_argument("--source")
     traj_list.add_argument("--success", type=int, choices=[0, 1], default=None)
 
-    # trajectory import-claude
-    traj_import = sub.add_parser("trajectory-import-claude", help="Import Claude Code transcripts")
+    # trajectory import-external_agent
+    traj_import = sub.add_parser("trajectory-import-external_agent", help="Import External Agent JSONL transcripts")
     traj_import.add_argument("input")
     traj_import.add_argument("--db", default=".trajectory/trajectories.db")
 
     # trajectory import
     traj_import_any = sub.add_parser(
         "trajectory-import",
-        help="Import Codex/OpenMegatron/custom trajectory JSON, JSONL, or logs",
+        help="Import external text-agent/OpenMegatron/custom trajectory JSON, JSONL, or logs",
     )
     traj_import_any.add_argument("input")
     traj_import_any.add_argument("--db", default=".trajectory/trajectories.db")
     traj_import_any.add_argument(
         "--format",
         default="auto",
-        choices=["auto", "codex", "openmegatron", "generic"],
+        choices=["auto", "agent_text", "openmegatron", "generic"],
         help="Input format hint (default: auto)",
     )
     traj_import_any.add_argument(
         "--source",
-        help="Override stored source label, for example codex or my_framework",
+        help="Override stored source label, for example agent_text or my_framework",
     )
 
     # trajectory train
@@ -437,8 +437,8 @@ async def main() -> int:
         return await trajectory_export(args)
     elif args.subcommand == "trajectory-list":
         return await trajectory_list(args)
-    elif args.subcommand == "trajectory-import-claude":
-        return await trajectory_import_claude(args)
+    elif args.subcommand == "trajectory-import-external_agent":
+        return await trajectory_import_external_agent(args)
     elif args.subcommand == "trajectory-import":
         return await trajectory_import(args)
     elif args.subcommand == "trajectory-train":

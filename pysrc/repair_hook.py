@@ -120,7 +120,7 @@ class RepairHook:
     Orchestrates: execute -> validate -> detect issues -> generate fix -> apply -> re-execute.
     """
 
-    LIGHTWEIGHT_MODELS = {"gpt-4o-mini", "gpt-3.5-turbo", "gemini-2.0-flash-lite", "claude-3-haiku", "llama-3.1-8b"}
+    LIGHTWEIGHT_MODELS = {"gpt-4o-mini", "gpt-3.5-turbo", "gemini-2.0-flash-lite", "qwen2.5-coder-7b", "llama-3.1-8b"}
 
     def __init__(self, agent=None, llm_client=None, model: str = None, max_retries: int = None):
         self._agent = agent

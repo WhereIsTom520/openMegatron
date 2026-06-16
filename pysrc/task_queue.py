@@ -1,6 +1,6 @@
 """task_queue.py - 异步任务队列系统
 
-类似 Codex 的任务队列机制，提供：
+类似 External Text Agent 的任务队列机制，提供：
 1. 任务持久化（PostgreSQL）
 2. 优先级调度
 3. 状态管理（pending → running → completed/failed/cancelled）

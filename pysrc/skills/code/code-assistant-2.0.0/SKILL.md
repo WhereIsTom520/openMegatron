@@ -2,7 +2,7 @@
 name: code_assistant
 version: 2.0.0
 category: code
-description: Full-stack code engineering — inspect, search, edit, build, test, lint, scan, git, and analyze. Reads like Claude Code, acts like a senior engineer.
+description: Full-stack code engineering — inspect, search, edit, build, test, lint, scan, git, and analyze. Reads like External Agent JSONL, acts like a senior engineer.
 risk: medium
 actions:
   - inspect
@@ -32,7 +32,7 @@ actions:
 
 # Code Assistant v2.0.0
 
-A Claude Code / Codex-grade software engineering assistant. Operates on real repositories
+A External-agent-grade software engineering assistant. Operates on real repositories
 with full read, edit, build, test, lint, scan, and git capabilities.
 
 ## Actions

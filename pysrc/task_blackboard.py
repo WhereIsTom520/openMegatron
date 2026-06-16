@@ -1,7 +1,7 @@
 """
 Task Blackboard — Agent progress tracking, checkpoint/resume, and strategy switching.
 
-Inspired by Claude Code's todo list and Agent checkpoint mechanisms:
+Inspired by External Agent JSONL's todo list and Agent checkpoint mechanisms:
   - Plans a multi-step task before execution
   - Marks each step as pending → in_progress → completed (or failed → retry)
   - Saves checkpoint state to disk for crash recovery

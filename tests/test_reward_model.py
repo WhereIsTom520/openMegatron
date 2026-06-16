@@ -115,8 +115,8 @@ class TestFeatureExtraction(unittest.TestCase):
         self.assertEqual(features["skill_count"], 2)
         self.assertAlmostEqual(features["avg_tool_duration"], 150.0)
         self.assertEqual(features["user_input_len"], 11)
-        self.assertEqual(features["source_is_claude"], 0)
-        self.assertEqual(features["source_is_codex"], 0)
+        self.assertEqual(features["source_is_external_agent"], 0)
+        self.assertEqual(features["source_is_agent_text"], 0)
         self.assertEqual(features["source_is_custom"], 0)
         self.assertEqual(features["task_is_code"], 1)
         self.assertEqual(features["task_is_frontend"], 0)
@@ -144,7 +144,7 @@ class TestFeatureExtraction(unittest.TestCase):
             ],
             "duration_ms": 1000.0,
             "success": False,
-            "source": "claude_code",
+            "source": "external_agent_jsonl",
             "created_at": "2025-06-15T09:00:00Z",
             "metadata": {},
         }
@@ -153,7 +153,7 @@ class TestFeatureExtraction(unittest.TestCase):
         self.assertEqual(features["tool_count"], 3)
         self.assertEqual(features["has_error_tool"], 1)
         self.assertAlmostEqual(features["error_tool_ratio"], 2.0 / 3.0, places=3)
-        self.assertEqual(features["source_is_claude"], 1)
+        self.assertEqual(features["source_is_external_agent"], 1)
         self.assertEqual(features["hour_of_day"], 9)
 
     def test_extract_features_with_rubric_signals(self):
@@ -169,7 +169,7 @@ class TestFeatureExtraction(unittest.TestCase):
             ],
             "duration_ms": 2400.0,
             "success": True,
-            "source": "codex",
+            "source": "agent_text",
             "created_at": "2025-06-15T10:00:00Z",
             "metadata": {
                 "feedback": {"label": 1, "confidence": 0.9},
@@ -178,7 +178,7 @@ class TestFeatureExtraction(unittest.TestCase):
         }
 
         features = extract_features(traj)
-        self.assertEqual(features["source_is_codex"], 1)
+        self.assertEqual(features["source_is_agent_text"], 1)
         self.assertEqual(features["task_is_frontend"], 1)
         self.assertEqual(features["task_is_code"], 1)
         self.assertGreaterEqual(features["verification_count"], 1)

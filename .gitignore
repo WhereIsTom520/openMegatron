@@ -45,6 +45,19 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local AI assistant, IDE, and automation-agent state
+.ai-local/
+.local-agent/
+.cursor/
+.roo/
+.windsurf/
+AGENT_NOTES.md
+LOCAL_AGENT_NOTES.md
+
+# Local imported agent traces before they are normalized
+.trajectory/agent_text/
+.trajectory/external_agent_jsonl/
+
 # Root-level one-off patch artifacts
 /_patch_*.py
 /patch_*.py

@@ -1,9 +1,9 @@
-"""Claude Code JSONL transcript parser.
+"""External Agent JSONL transcript parser.
 
-Parses Claude Code session transcript files (JSONL format) and converts them
+Parses External Agent JSONL session transcript files (JSONL format) and converts them
 into trajectory records compatible with TrajectoryStore.
 
-Claude Code transcript format (JSONL, one JSON object per line):
+External Agent JSONL transcript format (JSONL, one JSON object per line):
   - {"type":"user","message":{"role":"user","content":[...]}}
   - {"type":"assistant","message":{"role":"assistant","content":[...]}}
   - {"type":"tool_use","message":{"role":"assistant","content":[{"type":"tool_use",...}]}}
@@ -12,8 +12,8 @@ Claude Code transcript format (JSONL, one JSON object per line):
   - {"type":"system","message":{...}}    (may appear, skipped for trajectory extraction)
 
 Usage:
-    python -m pysrc.claude_code_parser parse /path/to/transcripts/ --output out.jsonl
-    python -m pysrc.claude_code_parser import /path/to/transcripts/ --db .trajectory/trajectories.db
+    python -m pysrc.external_agent_parser parse /path/to/transcripts/ --output out.jsonl
+    python -m pysrc.external_agent_parser import /path/to/transcripts/ --db .trajectory/trajectories.db
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ from trajectory_store import TrajectoryStore, _now_iso, _make_id
 logger = logging.getLogger(__name__)
 
 
-class ClaudeCodeParser:
-    """Parser for Claude Code JSONL transcript files."""
+class ExternalAgentParser:
+    """Parser for External Agent JSONL transcript files."""
 
     def parse_file(self, filepath: str) -> list[dict]:
         """Parse a single JSONL transcript file into raw turns.
@@ -83,7 +83,7 @@ class ClaudeCodeParser:
 
         return all_turns
 
-    def to_trajectories(self, turns: list[dict], source: str = "claude_code") -> list[dict]:
+    def to_trajectories(self, turns: list[dict], source: str = "external_agent_jsonl") -> list[dict]:
         """Convert parsed turns into trajectory store format."""
         trajectories = []
         for turn in turns:
@@ -105,7 +105,7 @@ class ClaudeCodeParser:
                 "source": source,
                 "created_at": _now_iso(),
                 "metadata": {
-                    "imported_from": "claude_code_parser",
+                    "imported_from": "external_agent_parser",
                     "original_session_id": str(turn.get("session_id", "")),
                 },
             }
@@ -238,7 +238,7 @@ class ClaudeCodeParser:
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "text":
-                    parts.append(ClaudeCodeParser._concat_text(block.get("text", "")))
+                    parts.append(ExternalAgentParser._concat_text(block.get("text", "")))
             return " ".join(parts)
         return ""
 
@@ -262,7 +262,7 @@ class ClaudeCodeParser:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Claude Code transcript parser — extract trajectories from JSONL logs",
+        description="External Agent JSONL transcript parser — extract trajectories from JSONL logs",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -287,7 +287,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] = None) -> None:
-    """CLI entry point: python -m pysrc.claude_code_parser <command> ..."""
+    """CLI entry point: python -m pysrc.external_agent_parser <command> ..."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -298,7 +298,7 @@ def main(argv: list[str] = None) -> None:
         store.close()
         return
 
-    cc_parser = ClaudeCodeParser()
+    cc_parser = ExternalAgentParser()
     input_path = Path(args.input)
 
     if input_path.is_file():

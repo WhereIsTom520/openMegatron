@@ -118,7 +118,7 @@ class OpenClawImporter:
         pending_actions: list[dict] = []
 
         user_re = re.compile(r"^\s*(?:User|USER|user|Human)\s*[:>]\s*(.+)$")
-        agent_re = re.compile(r"^\s*(?:Agent|AGENT|Assistant|Claude|Holo|Hermes)\s*[:>]\s*(.+)$")
+        agent_re = re.compile(r"^\s*(?:Agent|AGENT|Assistant|External Agent|Holo|Hermes)\s*[:>]\s*(.+)$")
         tool_re = re.compile(r"^\s*(?:Tool|TOOL|Action|Computer)\s*[:>]\s*(.+)$")
         screenshot_re = re.compile(r"(?:screenshot|screen|截图)[:\s]*([^\s]+\.(?:png|jpg|jpeg))", re.IGNORECASE)
 

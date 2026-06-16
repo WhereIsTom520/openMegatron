@@ -375,7 +375,7 @@ export const DEFAULT_MODEL_PROVIDERS: ModelProviderOption[] = [
   { id: 'minimax', label: 'MiniMax', baseUrl: 'https://api.minimax.chat/v1', models: [{ id: 'MiniMax-Text-01' }, { id: 'MiniMax-M1' }] },
   { id: 'stepfun', label: '阶跃星辰 / Stepfun', baseUrl: 'https://api.stepfun.com/v1', models: [{ id: 'step-2-mini' }, { id: 'step-2-16k' }, { id: 'step-1-8k' }] },
   { id: 'siliconflow', label: '硅基流动 / SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', models: [{ id: 'Qwen/Qwen2.5-72B-Instruct' }, { id: 'deepseek-ai/DeepSeek-V3' }, { id: 'deepseek-ai/DeepSeek-R1' }] },
-  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: [{ id: 'openai/gpt-4o-mini' }, { id: 'anthropic/claude-3.5-sonnet' }, { id: 'google/gemini-2.0-flash-001' }] },
+  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: [{ id: 'openai/gpt-4o-mini' }, { id: 'qwen/qwen3-235b-a22b' }, { id: 'google/gemini-2.0-flash-001' }] },
 ];
 
 export const DEFAULT_CONFIG: Config = {

@@ -76,7 +76,7 @@ PROVIDERS = {
         "label": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
         "model": "openai/gpt-4o-mini",
-        "models": ["openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "google/gemini-2.0-flash-001"],
+        "models": ["openai/gpt-4o-mini", "qwen/qwen3-235b-a22b", "google/gemini-2.0-flash-001"],
     },
 }
 

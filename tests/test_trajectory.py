@@ -1,9 +1,9 @@
-"""Tests for trajectory_store, trajectory_collector, and claude_code_parser.
+"""Tests for trajectory_store, trajectory_collector, and external_agent_parser.
 
 Covers Phase 1 of the companion model data pipeline:
   - TrajectoryStore: SQLite CRUD, query filters, stats, JSONL export
   - TrajectoryCollector: integration hook, graceful degradation
-  - ClaudeCodeParser: JSONL transcript parsing, trajectory conversion
+  - ExternalAgentParser: JSONL transcript parsing, trajectory conversion
 """
 
 import json
@@ -133,11 +133,11 @@ class TestTrajectoryStore(unittest.TestCase):
 
     def test_query_by_source(self):
         self.store.store({"session_id": "s1", "user_input": "a", "tool_calls": [], "success": True, "source": "openmegatron", "created_at": "2025-01-01T00:00:00Z"})
-        self.store.store({"session_id": "s2", "user_input": "b", "tool_calls": [], "success": True, "source": "claude_code", "created_at": "2025-01-02T00:00:00Z"})
+        self.store.store({"session_id": "s2", "user_input": "b", "tool_calls": [], "success": True, "source": "external_agent_jsonl", "created_at": "2025-01-02T00:00:00Z"})
 
         self.assertEqual(len(self.store.query(source="openmegatron")), 1)
-        self.assertEqual(len(self.store.query(source="claude_code")), 1)
-        self.assertEqual(len(self.store.query(source="codex")), 0)
+        self.assertEqual(len(self.store.query(source="external_agent_jsonl")), 1)
+        self.assertEqual(len(self.store.query(source="agent_text")), 0)
 
     def test_query_limit_offset(self):
         for i in range(10):
@@ -169,7 +169,7 @@ class TestTrajectoryStore(unittest.TestCase):
         self.store.store({
             "session_id": "s2", "user_input": "b", "tool_calls": [],
             "reward": 0.4, "confidence": 0.5, "success": False,
-            "duration_ms": 1500.0, "source": "claude_code",
+            "duration_ms": 1500.0, "source": "external_agent_jsonl",
             "created_at": "2025-01-16T00:00:00Z",
         })
 
@@ -179,7 +179,7 @@ class TestTrajectoryStore(unittest.TestCase):
         self.assertAlmostEqual(s["avg_reward"], 0.6)
         self.assertAlmostEqual(s["avg_confidence"], 0.7)
         self.assertAlmostEqual(s["avg_duration_ms"], 1000.0)
-        self.assertEqual(s["by_source"], {"openmegatron": 1, "claude_code": 1})
+        self.assertEqual(s["by_source"], {"openmegatron": 1, "external_agent_jsonl": 1})
         self.assertIn("2025-01-15", s["by_date"])
         self.assertIn("2025-01-16", s["by_date"])
 
@@ -318,12 +318,12 @@ class TestTrajectoryCollector(unittest.TestCase):
         self.assertTrue(callable(mock_agent._learn_from_task_trace))
 
 
-# ── TestClaudeCodeParser ──────────────────────────────────────────────────────
+# ── TestExternalAgentParser ──────────────────────────────────────────────────────
 
-class TestClaudeCodeParser(unittest.TestCase):
+class TestExternalAgentParser(unittest.TestCase):
     def setUp(self):
-        from claude_code_parser import ClaudeCodeParser
-        self.parser = ClaudeCodeParser()
+        from external_agent_parser import ExternalAgentParser
+        self.parser = ExternalAgentParser()
         self.tmpdir = tempfile.mkdtemp()
 
     def tearDown(self):
@@ -340,13 +340,13 @@ class TestClaudeCodeParser(unittest.TestCase):
 
     def test_parse_single_turn(self):
         path = self._write_jsonl("single.jsonl", [
-            {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Hello, Claude!"}]}},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Hello, External Agent!"}]}},
             {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi! How can I help?"}]}},
         ])
 
         turns = self.parser.parse_file(path)
         self.assertEqual(len(turns), 1)
-        self.assertEqual(turns[0]["user_input"], "Hello, Claude!")
+        self.assertEqual(turns[0]["user_input"], "Hello, External Agent!")
         self.assertEqual(turns[0]["final_answer"], "Hi! How can I help?")
         self.assertEqual(turns[0]["tool_calls"], [])
 
@@ -451,11 +451,11 @@ class TestClaudeCodeParser(unittest.TestCase):
             }
         ]
 
-        from claude_code_parser import ClaudeCodeParser
-        trajectories = ClaudeCodeParser().to_trajectories(turns)
+        from external_agent_parser import ExternalAgentParser
+        trajectories = ExternalAgentParser().to_trajectories(turns)
         self.assertEqual(len(trajectories), 1)
         t = trajectories[0]
-        self.assertEqual(t["source"], "claude_code")
+        self.assertEqual(t["source"], "external_agent_jsonl")
         self.assertEqual(t["user_input"], "What is Python?")
         self.assertEqual(t["tool_count"], 1)
         self.assertEqual(t["tool_calls"][0]["tool"], "web_search")
@@ -463,8 +463,8 @@ class TestClaudeCodeParser(unittest.TestCase):
         self.assertAlmostEqual(t["confidence"], 0.5)
 
     def test_to_trajectories_empty(self):
-        from claude_code_parser import ClaudeCodeParser
-        trajectories = ClaudeCodeParser().to_trajectories([])
+        from external_agent_parser import ExternalAgentParser
+        trajectories = ExternalAgentParser().to_trajectories([])
         self.assertEqual(len(trajectories), 0)
 
     def test_parse_string_content(self):
@@ -546,19 +546,19 @@ class TestTrajectoryImporter(unittest.TestCase):
         self.assertEqual(trajectories[0]["selected_skills"], ["paper-reader-1.0.0"])
         self.assertEqual(trajectories[0]["final_answer"], "summary")
 
-    def test_import_codex_jsonl_events(self):
+    def test_import_agent_text_jsonl_events(self):
         from trajectory_importer import TrajectoryImporter
 
-        path = self._write_jsonl("codex-session.jsonl", [
-            {"role": "user", "content": "fix failing tests", "session_id": "codex-s1"},
+        path = self._write_jsonl("agent_text-session.jsonl", [
+            {"role": "user", "content": "fix failing tests", "session_id": "agent_text-s1"},
             {"type": "tool_call", "tool": "shell", "arguments": "pytest", "output": "1 failed", "status": "error"},
             {"role": "assistant", "content": "Fixed the failing test."},
         ])
 
-        trajectories = TrajectoryImporter().parse_path(path, format="codex")
+        trajectories = TrajectoryImporter().parse_path(path, format="agent_text")
         self.assertEqual(len(trajectories), 1)
-        self.assertEqual(trajectories[0]["source"], "codex")
-        self.assertEqual(trajectories[0]["session_id"], "codex-s1")
+        self.assertEqual(trajectories[0]["source"], "agent_text")
+        self.assertEqual(trajectories[0]["session_id"], "agent_text-s1")
         self.assertEqual(trajectories[0]["user_input"], "fix failing tests")
         self.assertEqual(trajectories[0]["tool_calls"][0]["tool"], "shell")
         self.assertEqual(trajectories[0]["final_answer"], "Fixed the failing test.")

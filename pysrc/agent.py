@@ -165,7 +165,7 @@ DEFAULT_LLM_PROVIDERS = {
         "label": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
         "model": "openai/gpt-4o-mini",
-        "models": ["openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "google/gemini-2.0-flash-001"],
+        "models": ["openai/gpt-4o-mini", "qwen/qwen3-235b-a22b", "google/gemini-2.0-flash-001"],
     },
 }
 
@@ -283,7 +283,7 @@ class AgentContextManager:
     async def start_background_services(self):
         """Start auto-retrain daemon, task-queue broadcaster, and other
         long-running background services.  Call once after configure_llm()."""
-        # Import external logs (Claude Code / Codex / OpenClaw)
+        # Import external logs (External Agent JSONL / External Text Agent / OpenClaw)
         try:
             imported = self._import_external_logs()
             if imported["text"] > 0 or imported["visual"] > 0:
@@ -991,21 +991,21 @@ class YuanGeAgent:
             logger.debug('AutoRetrain daemon skipped: %s', e)
 
     def _import_external_logs(self):
-        """Scan and import Codex/ClaudeCode/OpenClaw logs on startup.
+        """Scan and import External Text Agent/ExternalAgentJSONL/OpenClaw logs on startup.
 
         Called once during agent initialization. Scans common log directories
         and imports any new trajectories into the stores.
         """
         imported = {"text": 0, "visual": 0}
 
-        # 1. Claude Code logs (~/.claude/projects/)
-        claude_dir = os.path.expanduser("~/.claude/projects/")
-        if os.path.isdir(claude_dir):
+        # 1. External Agent JSONL logs (~/.external_agent/projects/)
+        external_agent_dir = os.path.expanduser("~/.external_agent/projects/")
+        if os.path.isdir(external_agent_dir):
             try:
-                from claude_code_parser import ClaudeCodeParser
-                parser = ClaudeCodeParser()
-                turns = parser.parse_directory(claude_dir)
-                trajs = parser.to_trajectories(turns, source="claude_code")
+                from external_agent_parser import ExternalAgentParser
+                parser = ExternalAgentParser()
+                turns = parser.parse_directory(external_agent_dir)
+                trajs = parser.to_trajectories(turns, source="external_agent_jsonl")
                 store = getattr(self, '_trajectory_store', None)
                 if store and trajs:
                     for t in trajs:
@@ -1014,9 +1014,9 @@ class YuanGeAgent:
                             imported["text"] += 1
                         except Exception:
                             pass
-                logger.info("Imported %d Claude Code trajectories", len(trajs))
+                logger.info("Imported %d External Agent JSONL trajectories", len(trajs))
             except Exception as e:
-                logger.debug("Claude Code import skipped: %s", e)
+                logger.debug("External Agent JSONL import skipped: %s", e)
 
         # 2. OpenClaw logs (~/.openclaw/sessions/)
         openclaw_dir = os.path.expanduser("~/.openclaw/sessions/")
@@ -1054,17 +1054,17 @@ class YuanGeAgent:
             except Exception as e:
                 logger.debug("OpenClaw import skipped: %s", e)
 
-        # 3. Codex logs (~/.codex/logs/ or ./trajectory/codex/)
-        codex_dirs = [
-            os.path.expanduser("~/.codex/logs/"),
-            os.path.join(str(BASE_DIR.parent), ".trajectory", "codex"),
+        # 3. external text-agent logs (~/.agent_text/logs/ or ./trajectory/agent_text/)
+        agent_text_dirs = [
+            os.path.expanduser("~/.agent_text/logs/"),
+            os.path.join(str(BASE_DIR.parent), ".trajectory", "agent_text"),
         ]
-        for codex_dir in codex_dirs:
-            if os.path.isdir(codex_dir):
+        for agent_text_dir in agent_text_dirs:
+            if os.path.isdir(agent_text_dir):
                 try:
                     from trajectory_importer import TrajectoryImporter
                     importer = TrajectoryImporter()
-                    trajs = importer.parse_path(codex_dir, format="codex", source="codex")
+                    trajs = importer.parse_path(agent_text_dir, format="agent_text", source="agent_text")
                     store = getattr(self, '_trajectory_store', None)
                     if store and trajs:
                         for t in trajs:
@@ -1073,9 +1073,9 @@ class YuanGeAgent:
                                 imported["text"] += 1
                             except Exception:
                                 pass
-                    logger.info("Imported %d Codex trajectories from %s", len(trajs), codex_dir)
+                    logger.info("Imported %d External Text Agent trajectories from %s", len(trajs), agent_text_dir)
                 except Exception as e:
-                    logger.debug("Codex import skipped (%s): %s", codex_dir, e)
+                    logger.debug("External Text Agent import skipped (%s): %s", agent_text_dir, e)
 
         if imported["text"] > 0 or imported["visual"] > 0:
             logger.info(
@@ -1209,7 +1209,7 @@ class YuanGeAgent:
         """Check whether the selected model name is likely to accept images."""
         model_lower = str(self.model or "").lower()
         vision_indicators = [
-            "vision", "vl", "holo", "gemini", "claude", "gpt-4o",
+            "vision", "vl", "holo", "gemini", "gpt-4o",
             "gpt-4-turbo", "gpt-4.1", "qwen-vl", "llava", "cogvlm",
             "pixtral", "multimodal",
         ]
@@ -1608,7 +1608,7 @@ class YuanGeAgent:
     async def start_background_services(self):
         """Start auto-retrain daemon, task-queue broadcaster, and other
         long-running background services.  Call once after configure_llm()."""
-        # Import external logs (Claude Code / Codex / OpenClaw)
+        # Import external logs (External Agent JSONL / External Text Agent / OpenClaw)
         try:
             imported = self._import_external_logs()
             if imported["text"] > 0 or imported["visual"] > 0:
@@ -1984,7 +1984,7 @@ class YuanGeAgent:
         code = candidate.get("code") or ""
         output_preview = candidate.get("output_preview") or ""
         prompt = (
-            "Convert this successful one-off Python script into one reusable Codex skill. "
+            "Convert this successful one-off Python script into one reusable automation skill. "
             "Return one JSON object only. No markdown. "
             "Schema: {"
             "\"skill_name\": snake_case string, "
@@ -2013,7 +2013,7 @@ class YuanGeAgent:
             res = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You turn successful automation scripts into durable, well-scoped Codex skills. Return JSON only."},
+                    {"role": "system", "content": "You turn successful automation scripts into durable, well-scoped reusable automation skills. Return JSON only."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -2929,7 +2929,7 @@ class YuanGeAgent:
                 "\u4fee\u590d", "\u8c03\u8bd5", "\u62a5\u9519", "\u91cd\u6784", "\u5355\u5143\u6d4b\u8bd5",
                 "code", "coding", "program", "programmer", "bug", "debug", "fix", "refactor",
                 "implement", "patch", "test", "pytest", "lint", "build", "typescript", "javascript",
-                "python", "frontend", "backend", "claude code", "claudcode"
+                "python", "frontend", "backend", "external_agent code", "externalagentjsonl"
             ],
         }
         category_keywords["research"].extend([

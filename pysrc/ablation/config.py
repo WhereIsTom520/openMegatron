@@ -83,8 +83,8 @@ COMPANION_ABLATIONS = {
 # Tests the impact of external log import
 TRAINING_ABLATIONS = {
     "all_sources": {
-        "description": "Training data from all sources (Codex + ClaudeCode + OpenClaw + self)",
-        "sources": ["codex", "claude_code", "openclaw", "self"],
+        "description": "Training data from all sources (External Text Agent + ExternalAgentJSONL + OpenClaw + self)",
+        "sources": ["agent_text", "external_agent_jsonl", "openclaw", "self"],
     },
     "self_only": {
         "description": "Training data from self-play only",
@@ -92,11 +92,11 @@ TRAINING_ABLATIONS = {
     },
     "external_only": {
         "description": "Training data from external logs only",
-        "sources": ["codex", "claude_code", "openclaw"],
+        "sources": ["agent_text", "external_agent_jsonl", "openclaw"],
     },
-    "codex_only": {
-        "description": "Training data from Codex logs only",
-        "sources": ["codex"],
+    "agent_text_only": {
+        "description": "Training data from external text-agent logs only",
+        "sources": ["agent_text"],
     },
 }
 
@@ -146,7 +146,7 @@ BENCHMARK_QUERIES = {
     "multi_hop": [
         "If a document mentions 'Neo4j', what entities will be created and how do they connect?",
         "How does a failed GUI action affect the companion model training pipeline?",
-        "Trace the path of a Claude Code log entry through the entire system.",
+        "Trace the path of a External Agent JSONL log entry through the entire system.",
         "What happens when a companion model fails — trace the full fallback chain.",
         "How does changing the ontology definition affect existing memory data?",
         "Walk through the complete lifecycle of a user query from input to answer.",

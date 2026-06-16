@@ -1,7 +1,7 @@
 """Companion Model Router — auto-switch between cloud and companion models.
 
 Integrates with agent.py to dynamically route requests between:
-  1. Cloud model (GPT-4, Claude) — complex tasks, first attempt
+  1. Cloud model (GPT-4, External Agent) — complex tasks, first attempt
   2. Companion model (local) — simple tasks, retries, cost-saving
 
 Decision logic:
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class ModelTarget(str, Enum):
-    CLOUD = "cloud"           # Use the main cloud model (GPT-4, Claude)
+    CLOUD = "cloud"           # Use the main cloud model (GPT-4, External Agent)
     COMPANION = "companion"    # Use the local companion model
     AUTO = "auto"             # Auto-detect best target
 

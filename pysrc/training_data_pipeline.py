@@ -7,7 +7,7 @@ Converts text + visual trajectories into:
 Integrates with:
   - TrajectoryStore (text trajectories)
   - VisualTrajectoryStore (visual trajectories)
-  - ClaudeCodeParser (Claude Code logs)
+  - ExternalAgentParser (External Agent JSONL logs)
   - OpenClawImporter (OpenClaw/Hermes logs)
 
 Output formats:
@@ -53,10 +53,10 @@ class TrainingDataPipeline:
     """Build SFT/DPO training datasets from all available trajectory sources."""
 
     def __init__(self, text_store=None, visual_store=None,
-                 claude_code_dir: str = None, openclaw_dir: str = None):
+                 external_agent_jsonl_dir: str = None, openclaw_dir: str = None):
         self._text_store = text_store
         self._visual_store = visual_store
-        self._claude_code_dir = claude_code_dir
+        self._external_agent_jsonl_dir = external_agent_jsonl_dir
         self._openclaw_dir = openclaw_dir
 
     @staticmethod
@@ -157,25 +157,25 @@ class TrainingDataPipeline:
             except Exception as e:
                 logger.warning(f"Visual store SFT build failed: {e}")
 
-        # 3. From Claude Code logs
-        if self._claude_code_dir and os.path.isdir(self._claude_code_dir):
+        # 3. From External Agent JSONL logs
+        if self._external_agent_jsonl_dir and os.path.isdir(self._external_agent_jsonl_dir):
             try:
-                from claude_code_parser import ClaudeCodeParser
-                parser = ClaudeCodeParser()
-                turns = parser.parse_directory(self._claude_code_dir)
-                trajs = parser.to_trajectories(turns, source="claude_code")
+                from external_agent_parser import ExternalAgentParser
+                parser = ExternalAgentParser()
+                turns = parser.parse_directory(self._external_agent_jsonl_dir)
+                trajs = parser.to_trajectories(turns, source="external_agent_jsonl")
                 for t in trajs[:max_examples]:
                     if t.get("reward", 0.5) >= min_quality:
                         examples.append(SFTExample(
                             user_input=t.get("user_input", ""),
                             tool_calls=t.get("tool_calls", []),
                             final_answer=t.get("final_answer", ""),
-                            source="claude_code",
+                            source="external_agent_jsonl",
                             quality_score=t.get("reward", 0.5),
                         ))
-                stats.source_breakdown["claude_code"] = len(trajs)
+                stats.source_breakdown["external_agent_jsonl"] = len(trajs)
             except Exception as e:
-                logger.warning(f"Claude Code SFT build failed: {e}")
+                logger.warning(f"External Agent JSONL SFT build failed: {e}")
 
         # 4. From OpenClaw logs
         if self._openclaw_dir and os.path.isdir(self._openclaw_dir):
@@ -383,7 +383,7 @@ if __name__ == "__main__":
     )
     p.add_argument("--text-db", default=".trajectory/trajectories.db")
     p.add_argument("--visual-db", default=".trajectory/visual_trajectories.db")
-    p.add_argument("--claude-code-dir", help="Claude Code transcript directory")
+    p.add_argument("--external-agent-jsonl-dir", help="External Agent JSONL transcript directory")
     p.add_argument("--openclaw-dir", help="OpenClaw log directory")
     p.add_argument("--output-dir", default=".training_data")
     p.add_argument("--min-quality", type=float, default=0.5)
@@ -400,7 +400,7 @@ if __name__ == "__main__":
     pipeline = TrainingDataPipeline(
         text_store=text_store,
         visual_store=visual_store,
-        claude_code_dir=args.claude_code_dir,
+        external_agent_jsonl_dir=args.external_agent_jsonl_dir,
         openclaw_dir=args.openclaw_dir,
     )
 

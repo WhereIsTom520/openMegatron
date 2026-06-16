@@ -456,7 +456,7 @@ class ExplorationEngine:
                 "skill_count": 1,
                 "avg_tool_duration": duration_ms,
                 "user_input_len": len(strategy_name),
-                "source_is_claude": 0,
+                "source_is_external_agent": 0,
                 "hour_of_day": 12,
                 "stability": entry["success_rate"],
                 "speed": 1.0,

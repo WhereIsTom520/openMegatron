@@ -980,13 +980,13 @@ class RAGIngestTool(BaseTool):
 
 
 class ImportLogsTool(BaseTool):
-    """Import training data from external agent logs (Claude Code, Codex, OpenClaw)."""
+    """Import training data from external agent logs (External Agent JSONL, External Text Agent, OpenClaw)."""
 
     def __init__(self, agent):
         self.name = "import_training_logs"
         self.description = (
             "Import agent trajectories from external log sources: "
-            "Claude Code transcripts, Codex logs, and OpenClaw/Hermes sessions. "
+            "External Agent JSONL transcripts, external text-agent logs, and OpenClaw/Hermes sessions. "
             "These trajectories are used to train the companion reward model."
         )
         self.parameters_schema = {
@@ -994,7 +994,7 @@ class ImportLogsTool(BaseTool):
             "properties": {
                 "source": {
                     "type": "string",
-                    "enum": ["claude_code", "codex", "openclaw", "auto"],
+                    "enum": ["external_agent_jsonl", "agent_text", "openclaw", "auto"],
                     "description": "Log source to import. auto scans all known locations.",
                 },
                 "path": {
@@ -1009,14 +1009,14 @@ class ImportLogsTool(BaseTool):
                       session_id: str = None):
         imported = {"text": 0, "visual": 0, "errors": []}
 
-        if source in ("auto", "claude_code"):
-            claude_dir = path or os.path.expanduser("~/.claude/projects/")
-            if os.path.isdir(claude_dir):
+        if source in ("auto", "external_agent_jsonl"):
+            external_agent_dir = path or os.path.expanduser("~/.external_agent/projects/")
+            if os.path.isdir(external_agent_dir):
                 try:
-                    from claude_code_parser import ClaudeCodeParser
-                    parser = ClaudeCodeParser()
-                    turns = parser.parse_directory(claude_dir)
-                    trajs = parser.to_trajectories(turns, source="claude_code")
+                    from external_agent_parser import ExternalAgentParser
+                    parser = ExternalAgentParser()
+                    turns = parser.parse_directory(external_agent_dir)
+                    trajs = parser.to_trajectories(turns, source="external_agent_jsonl")
                     store = getattr(self.agent, '_trajectory_store', None)
                     if store:
                         for t in trajs:
@@ -1026,7 +1026,7 @@ class ImportLogsTool(BaseTool):
                             except Exception:
                                 pass
                 except Exception as e:
-                    imported["errors"].append(f"claude_code: {e}")
+                    imported["errors"].append(f"external_agent_jsonl: {e}")
 
         if source in ("auto", "openclaw"):
             oc_dir = path or os.path.expanduser("~/.openclaw/sessions/")
@@ -1056,13 +1056,13 @@ class ImportLogsTool(BaseTool):
                 except Exception as e:
                     imported["errors"].append(f"openclaw: {e}")
 
-        if source in ("auto", "codex"):
-            codex_dir = path or os.path.expanduser("~/.codex/logs/")
-            if os.path.isdir(codex_dir):
+        if source in ("auto", "agent_text"):
+            agent_text_dir = path or os.path.expanduser("~/.agent_text/logs/")
+            if os.path.isdir(agent_text_dir):
                 try:
                     from trajectory_importer import TrajectoryImporter
                     importer = TrajectoryImporter()
-                    trajs = importer.parse_path(codex_dir, format="codex", source="codex")
+                    trajs = importer.parse_path(agent_text_dir, format="agent_text", source="agent_text")
                     store = getattr(self.agent, '_trajectory_store', None)
                     if store:
                         for t in trajs:
@@ -1072,7 +1072,7 @@ class ImportLogsTool(BaseTool):
                             except Exception:
                                 pass
                 except Exception as e:
-                    imported["errors"].append(f"codex: {e}")
+                    imported["errors"].append(f"agent_text: {e}")
 
         # Build training datasets after import
         dataset_result = None

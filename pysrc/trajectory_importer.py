@@ -1,6 +1,6 @@
 """Multi-source trajectory importer.
 
-Normalizes offline data from Codex logs, OpenMegatron exports, and custom
+Normalizes offline data from external text-agent logs, OpenMegatron exports, and custom
 framework JSON/JSONL into TrajectoryStore-compatible records.
 """
 
@@ -16,7 +16,7 @@ from trajectory_store import _make_id, _now_iso
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_FORMATS = {"auto", "codex", "openmegatron", "generic"}
+SUPPORTED_FORMATS = {"auto", "agent_text", "openmegatron", "generic"}
 JSON_SUFFIXES = {".json", ".jsonl", ".ndjson"}
 TEXT_SUFFIXES = {".log", ".txt"}
 
@@ -35,7 +35,7 @@ class TrajectoryImporter:
 
         Args:
             path: File or directory path.
-            format: auto, codex, openmegatron, or generic.
+            format: auto, agent_text, openmegatron, or generic.
             source: Optional source label to store on each trajectory.
         """
         fmt = format.lower().strip()
@@ -67,8 +67,8 @@ class TrajectoryImporter:
         if fmt == "auto":
             fmt = self._detect_format(file_path)
 
-        if fmt == "codex":
-            return self._parse_codex_file(file_path, source=source or "codex")
+        if fmt == "agent_text":
+            return self._parse_agent_text_file(file_path, source=source or "agent_text")
         if fmt == "openmegatron":
             return self._parse_json_trajectories(file_path, source=source or "openmegatron")
         return self._parse_json_trajectories(file_path, source=source or "custom")
@@ -79,8 +79,8 @@ class TrajectoryImporter:
 
     def _detect_format(self, path: Path) -> str:
         name = path.name.lower()
-        if "codex" in name or path.suffix.lower() in TEXT_SUFFIXES:
-            return "codex"
+        if "agent_text" in name or path.suffix.lower() in TEXT_SUFFIXES:
+            return "agent_text"
         return "generic"
 
     def _parse_json_trajectories(self, path: Path, *, source: str) -> list[dict]:
@@ -94,7 +94,7 @@ class TrajectoryImporter:
                 trajectories.append(normalized)
         return trajectories
 
-    def _parse_codex_file(self, path: Path, *, source: str) -> list[dict]:
+    def _parse_agent_text_file(self, path: Path, *, source: str) -> list[dict]:
         if path.suffix.lower() in JSON_SUFFIXES:
             records = self._read_json_records(path)
             direct: list[dict] = []
@@ -107,10 +107,10 @@ class TrajectoryImporter:
                     direct.append(normalized)
                 else:
                     events.append(record)
-            event_trajectories = self._codex_events_to_trajectories(events, session_id=path.stem, source=source)
+            event_trajectories = self._agent_text_events_to_trajectories(events, session_id=path.stem, source=source)
             return direct + event_trajectories
 
-        return self._parse_codex_text_log(path, source=source)
+        return self._parse_agent_text_text_log(path, source=source)
 
     def _read_json_records(self, path: Path) -> list[Any]:
         if path.suffix.lower() in {".jsonl", ".ndjson"}:
@@ -183,7 +183,7 @@ class TrajectoryImporter:
             "metadata": normalized_metadata,
         }
 
-    def _codex_events_to_trajectories(self, events: Iterable[dict], *, session_id: str, source: str) -> list[dict]:
+    def _agent_text_events_to_trajectories(self, events: Iterable[dict], *, session_id: str, source: str) -> list[dict]:
         turns: list[dict] = []
         current: dict | None = None
         pending_tools: list[dict] = []
@@ -244,11 +244,11 @@ class TrajectoryImporter:
 
         return [self.normalize_record(turn, source=source, row_index=i) for i, turn in enumerate(turns)]
 
-    def _parse_codex_text_log(self, path: Path, *, source: str) -> list[dict]:
+    def _parse_agent_text_text_log(self, path: Path, *, source: str) -> list[dict]:
         turns: list[dict] = []
         current: dict | None = None
         user_re = re.compile(r"^\s*(?:user|prompt|input)\s*[:>]\s*(.+)$", re.IGNORECASE)
-        assistant_re = re.compile(r"^\s*(?:assistant|codex|output)\s*[:>]\s*(.+)$", re.IGNORECASE)
+        assistant_re = re.compile(r"^\s*(?:assistant|agent_text|output)\s*[:>]\s*(.+)$", re.IGNORECASE)
         tool_re = re.compile(r"^\s*(?:tool|command|exec)\s*[:>]\s*(.+)$", re.IGNORECASE)
 
         with path.open("r", encoding="utf-8", errors="replace") as file:
@@ -278,7 +278,7 @@ class TrajectoryImporter:
                 tool_match = tool_re.match(text)
                 if tool_match:
                     current["tool_calls"].append({
-                        "tool": "codex_command",
+                        "tool": "agent_text_command",
                         "args": tool_match.group(1)[:500],
                         "output_preview": "",
                         "duration_ms": 0.0,
@@ -337,7 +337,7 @@ class TrajectoryImporter:
             args = json.dumps(args, ensure_ascii=False)
         tool = call.get("tool") or call.get("tool_name") or call.get("name") or call.get("function_name")
         if not tool and call.get("command"):
-            tool = "codex_command"
+            tool = "agent_text_command"
         return {
             "id": str(call.get("id") or call.get("tool_call_id") or call.get("call_id") or ""),
             "tool": str(tool or "unknown"),

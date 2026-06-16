@@ -38,7 +38,7 @@ class TrajectoryCollector:
             task_trace: The task_trace dict from agent.chat().
                 Expected keys: session_id, user_goal, selected_skills,
                 tool_calls, success, final_answer, started_at, reward_profile.
-            source: Origin label ("openmegatron", "claude_code", "codex").
+            source: Origin label ("openmegatron", "external_agent_jsonl", "agent_text").
 
         Returns:
             The trajectory ID if stored successfully, None otherwise.

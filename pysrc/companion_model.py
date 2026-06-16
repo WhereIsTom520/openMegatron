@@ -1,6 +1,6 @@
 """Companion Model — load and run small models for agent inference.
 
-Replaces the large cloud model (GPT-4/Claude) with a locally fine-tuned
+Replaces the large cloud model (GPT-4/External Agent) with a locally fine-tuned
 small model (Holo 3.1, Qwen 2.5, Llama 3.2, etc.) for specific task domains.
 
 Supports three backends:

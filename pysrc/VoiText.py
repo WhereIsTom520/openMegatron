@@ -9,7 +9,7 @@ import torch
 import tkinter as tk
 from funasr import AutoModel
 
-cache_dir = r"E:\work\model\Seaco-Paraformer"  
+cache_dir = os.environ.get("MODELSCOPE_CACHE") or os.path.join(os.getcwd(), ".models", "modelscope")
 os.makedirs(cache_dir, exist_ok=True)
 os.environ["MODELSCOPE_CACHE"] = cache_dir
 

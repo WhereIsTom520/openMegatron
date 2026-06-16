@@ -43,12 +43,12 @@ FEATURE_NAMES = [
     "skill_count",
     "avg_tool_duration",
     "user_input_len",
-    "source_is_claude",
+    "source_is_external_agent",
     "hour_of_day",
     "stability",
     "speed",
     "efficiency",
-    "source_is_codex",
+    "source_is_agent_text",
     "source_is_custom",
     "task_is_frontend",
     "task_is_code",
@@ -106,9 +106,9 @@ def extract_features(trajectory: dict) -> dict:
 
     # Source encoding
     source = str(trajectory.get("source", "openmegatron")).lower()
-    source_is_claude = 1 if source == "claude_code" else 0
-    source_is_codex = 1 if source == "codex" else 0
-    source_is_custom = 1 if source not in {"openmegatron", "claude_code", "codex"} else 0
+    source_is_external_agent = 1 if source == "external_agent_jsonl" else 0
+    source_is_agent_text = 1 if source == "agent_text" else 0
+    source_is_custom = 1 if source not in {"openmegatron", "external_agent_jsonl", "agent_text"} else 0
 
     # Hour of day
     created_at = str(trajectory.get("created_at", ""))
@@ -150,12 +150,12 @@ def extract_features(trajectory: dict) -> dict:
         "skill_count": skill_count,
         "avg_tool_duration": round(avg_tool_duration, 2),
         "user_input_len": user_input_len,
-        "source_is_claude": source_is_claude,
+        "source_is_external_agent": source_is_external_agent,
         "hour_of_day": hour_of_day,
         "stability": round(stability, 4),
         "speed": round(speed, 4),
         "efficiency": round(efficiency, 4),
-        "source_is_codex": source_is_codex,
+        "source_is_agent_text": source_is_agent_text,
         "source_is_custom": source_is_custom,
         "task_is_frontend": task_is_frontend,
         "task_is_code": task_is_code,

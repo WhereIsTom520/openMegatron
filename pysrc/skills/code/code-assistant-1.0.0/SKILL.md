@@ -1,6 +1,6 @@
 ---
 name: code_assistant
-description: Claude Code-style software engineering workflow for repository inspection, bug fixing, feature implementation, refactoring, and verification without loading unrelated skill categories.
+description: External-agent-style software engineering workflow for repository inspection, bug fixing, feature implementation, refactoring, and verification without loading unrelated skill categories.
 category: code
 entry_function: main
 parameters:
@@ -32,7 +32,7 @@ parameters:
       description: Maximum characters to return per file.
   required:
     - action
-keywords: [code, coding, programmer, claude code, claudcode, repository, bug, debug, fix, implement, refactor, patch, test, build, lint]
+keywords: [code, coding, programmer, external_agent code, externalagentjsonl, repository, bug, debug, fix, implement, refactor, patch, test, build, lint]
 capabilities: [inspect, search, read, analyze, plan]
 consumes:
   path: optional workspace path or file paths

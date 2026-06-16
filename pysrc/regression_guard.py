@@ -198,12 +198,12 @@ class RegressionGuard:
             # Zero tool calls, zero duration
             {"tool_count": 0, "duration_ms": 0, "has_error_tool": 0, "error_tool_ratio": 0,
              "skill_count": 0, "avg_tool_duration": 0, "user_input_len": 0,
-             "source_is_claude": 0, "hour_of_day": 0,
+             "source_is_external_agent": 0, "hour_of_day": 0,
              "stability": 1.0, "speed": 1.0, "efficiency": 1.0},
             # All errors
             {"tool_count": 10, "duration_ms": 60000, "has_error_tool": 1, "error_tool_ratio": 1.0,
              "skill_count": 3, "avg_tool_duration": 6000, "user_input_len": 500,
-             "source_is_claude": 0, "hour_of_day": 23,
+             "source_is_external_agent": 0, "hour_of_day": 23,
              "stability": 0.0, "speed": 0.0, "efficiency": 0.0},
         ]
 

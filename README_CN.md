@@ -81,18 +81,18 @@ start.bat -FrontendPort 3001
 ## 它能做什么
 
 - **AI Agent 聊天工作台**：前端聊天界面 + 后端工具调用。
-- **多模型接入**：支持 OpenAI 兼容接口、Claude/Opus 类接口、DeepSeek、本地 llama.cpp 等。
+- **多模型接入**：支持 OpenAI 兼容接口、DeepSeek、本地 llama.cpp 等。
 - **技能系统**：代码、科研、办公、媒体、Agent 编排等技能包。
 - **长期记忆**：Redis + PostgreSQL/pgvector + Neo4j 的混合记忆系统。
 - **RAG 检索**：文档入库、向量检索、图谱检索、引用式回答。
 - **伴生模型闭环**：收集任务轨迹，训练奖励/评分模型，用于改进任务评分、路由和自动化。
 - **GUI 自动化**：支持截图、点击、输入、滚动、拖拽等电脑操作能力。
-- **外部日志投喂**：支持导入 Claude Code、Codex 兼容日志、OpenClaw/Hermes 轨迹。
+- **外部日志投喂**：支持导入 External Agent JSONL、External Text Agent 兼容日志、OpenClaw/Hermes 轨迹。
 - **评估与消融**：提供 RAG、记忆、伴生模型相关的实验脚手架。
 
 ## 伴生模型是什么
 
-当前的伴生模型不是“直接替代 GPT/Opus 的完整大模型”，而是围绕 OpenMegatron 运行产生的数据建立本地学习闭环：
+当前的伴生模型不是“直接替代云端大模型”，而是围绕 OpenMegatron 运行产生的数据建立本地学习闭环：
 
 1. 收集任务轨迹、工具调用、成功/失败信号。
 2. 训练奖励模型或评分器。

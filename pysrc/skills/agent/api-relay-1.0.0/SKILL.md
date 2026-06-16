@@ -52,7 +52,7 @@ Provides unified interface for key management, model discovery, and health check
 |---------|--------|----------|
 | one-api | songquanpeng/one-api | 34k+ stars, original relay gateway |
 | new-api | Calcium-Ion/new-api | one-api successor with monitoring |
-| CliRelay | kittors/CliRelay | CLI-to-API bridge for Claude Code |
+| CliRelay | kittors/CliRelay | CLI-to-API bridge for External Agent JSONL |
 | ds2api | CJackHwang/ds2api | DeepSeek protocol bridge |
 
 ## Actions
