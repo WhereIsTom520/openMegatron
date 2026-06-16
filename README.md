@@ -1,144 +1,148 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue" alt="Python">
-  <img src="https://img.shields.io/badge/TypeScript-React-3178c6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-300+-brightgreen" alt="Tests">
-</p>
+# OpenMegatron
 
-OpenMegatron — 模块化多模型 AI Agent 平台。30+ 内置工具、三存储混合 RAG、伴生模型自我训练、视觉 Agent 飞轮、本体对齐的超图记忆。
+OpenMegatron is a local AI agent workbench for chat, tool use, long-term memory, research retrieval, code tasks, GUI automation, and trajectory-driven companion-model learning.
+
+The main rule is simple: **on Windows, start with `start.bat`. Do not manually start every component unless you are debugging.**
 
 [English](README.md) | [中文](README_CN.md)
 
-## 快速开始
+## One-Click Start
 
-### 环境要求
+### 1. Download
 
-- Python 3.11+
-- Node.js 18+
-- Redis（会话缓存）
-- PostgreSQL + pgvector（向量存储）
-- Neo4j（图数据库）
+Download the source code from the GitHub Release:
 
-### 安装与启动
+https://github.com/WhereIsTom520/openMegatron/releases/tag/v1.0.0
 
-```bash
-# 1. 克隆项目
-git clone https://github.com/GodOn514/openMegatron.git
-cd openMegatron
+Unzip it and open the `openMegatron` folder.
 
-# 2. 安装 Python 依赖
-python scripts/runtime_setup.py
+### 2. Configure a Model
 
-# 3. 安装前端依赖
-npm install
+Edit:
 
-# 4. 配置模型（编辑 pysrc/model.toml，填入 API key）
-# 默认使用 OpenAI，也支持 DeepSeek、本地 llama.cpp 等
-
-# 5. 启动数据库（三选一）
-docker-compose up -d          # Docker 一键启动 Redis + PostgreSQL + Neo4j
-# 或者手动启动本地已安装的三个数据库
-
-# 6. 一键启动
-start.bat                     # Windows
-# 或者分别启动：
-python pysrc/agent.py --api   # 后端 :8000
-npm run dev                   # 前端 :3000
+```text
+pysrc/model.toml
 ```
 
-浏览器打开 `http://localhost:3000`，无需登录。
+Add your provider, API key, base URL, and model name.
 
-## 能做什么
+### 3. Start
 
-- **30+ 工具自由组合**：代码执行、子代理委托、记忆搜索、RAG 检索、GUI 自动化（截屏/点击/键入）、定时任务、技能市场、进化提案
-- **任何模型即插即用**：自动探测模型能力（上下文窗口、工具调用、视觉支持），GPT-4、Claude、DeepSeek、本地 llama.cpp、Holo 3.1 全部兼容
-- **三存储混合 RAG**：PostgreSQL/pgvector 存文档块，Neo4j 存实体图谱和多跳关系，Redis 做语义缓存
-- **伴生模型自己训练自己**：每次对话自动收集轨迹 → 训练评分模型 → 每 50 条自动重训 → 自动部署
-- **视觉 Agent 飞轮**：截屏 → VLM 看图决策 → 执行 GUI 动作 → 收集视觉轨迹 → 训练视觉评分模型 → DPO 微调本地小模型
-- **本体对齐的记忆系统**：23 种节点 + 26 种关系 + 5 种超边。记忆、RAG、脱水器、决策追踪全部围绕统一本体论运作
+Double-click:
 
-## 架构速览
-
-```
-用户输入
-    │
-    ▼
-agent.chat()
-    ├── CompanionRouter  →  简单任务用本地模型，复杂任务用云端
-    ├── SkillRouter      →  匹配技能 + 模型层级
-    ├── 执行工具调用     →  30+ 工具可选
-    ├── TrajectoryCollector → 持久化轨迹
-    ├── Memory           →  Redis + PostgreSQL/pgvector + Neo4j
-    └── RAG              →  文档入库 → 混合检索 → 带引用回答
-
-训练闭环：
-TrajectoryStore → reward_model → AutoRetrainLoop → 自动部署
-
-视觉闭环：
-截屏 → VLM → GUI 动作 → visual_trajectory → visual_reward → DPO → QLoRA → GGUF → 本地推理
+```text
+start.bat
 ```
 
-## 项目结构
+Or run:
 
+```bat
+start.bat
 ```
+
+The launcher handles:
+
+- Python virtual environment
+- Python dependencies
+- frontend dependencies
+- Docker databases
+- backend server
+- frontend server
+- port conflict detection
+
+Open the URL printed by the launcher, usually:
+
+```text
+http://localhost:3000
+```
+
+If port `3000` is busy, the launcher automatically tries `3001`, `3002`, and so on.
+
+## Common Commands
+
+```bat
+start.bat             Start backend and frontend
+start.bat health      Check service status
+start.bat stop        Stop services
+start.bat install     Reinstall dependencies
+start.bat test        Run tests
+start.bat menu        Open menu
+```
+
+Advanced options:
+
+```bat
+start.bat -NoBrowser
+start.bat -SkipDocker
+start.bat -BackendPort 8001
+start.bat -FrontendPort 3001
+```
+
+## What It Does
+
+- **Agent chat workbench**: web UI plus backend tool execution.
+- **Multi-model support**: OpenAI-compatible APIs, Claude/Opus-style providers, DeepSeek, local llama.cpp, and similar endpoints.
+- **Skill system**: code, research, office, media, and agent-orchestration skill packs.
+- **Long-term memory**: Redis + PostgreSQL/pgvector + Neo4j.
+- **RAG retrieval**: document ingestion, vector search, graph search, and citation-style answers.
+- **Companion-model loop**: collect task traces, train reward/scoring models, improve routing and quality checks.
+- **GUI automation**: screenshot, click, type, scroll, drag, and related computer-control actions.
+- **External log ingestion**: Claude Code, Codex-compatible logs, OpenClaw/Hermes trajectories.
+- **Evaluation scaffolding**: ablation experiments for RAG, memory, and companion AI components.
+
+## What The Companion Model Means
+
+The companion model is not presented as a full replacement for GPT/Opus. In the current 1.0 release, it is a local learning loop around OpenMegatron:
+
+1. collect task traces and tool-call outcomes;
+2. train reward/scoring models;
+3. use those scores for task evaluation, routing, retraining, and regression checks;
+4. optionally extend toward SFT/DPO/QLoRA workflows for local models.
+
+Its value is that OpenMegatron can learn from your own task history instead of relying only on fixed rules.
+
+## Project Layout
+
+```text
 openMegatron/
-├── pysrc/
-│   ├── agent.py              # 核心 Agent 循环
-│   ├── skill.py              # 30+ 工具
-│   ├── api.py                # FastAPI + WebSocket
-│   ├── model_tier.py         # 模型能力自动探测
-│   ├── memory.py + ontology  # 三存储记忆 + 23 类型本体
-│   ├── rag_*.py              # 混合 RAG (入库/检索/回答/同步)
-│   ├── companion_*.py        # 伴生模型 (加载/路由)
-│   ├── qlora_trainer.py      # QLoRA 微调
-│   ├── gguf_exporter.py      # GGUF 导出
-│   ├── reward_*.py           # 奖励评分 (裁判模型)
-│   ├── trajectory_*.py       # 轨迹收集 + 存储
-│   ├── visual_*.py           # 视觉 Agent 飞轮
-│   └── skills/               # 版本化技能包
-├── src/                      # React/TypeScript 前端
-├── tests/                    # 300+ 测试
-├── start.bat                 # 一键启动
-└── docker-compose.yml
+├── start.bat              Windows one-click launcher
+├── start.ps1              launcher implementation
+├── pysrc/                 Python backend
+│   ├── agent.py           core agent loop
+│   ├── skill.py           tool and skill registry
+│   ├── memory.py          long-term memory and RAG storage
+│   ├── reward_*.py        reward model and training
+│   ├── trajectory_*.py    trace collection and import
+│   └── skills/            skill packs
+├── src/                   React frontend
+├── tests/                 Python tests
+└── docker-compose.yml     Redis/PostgreSQL/Neo4j
 ```
 
-## 伴生模型训练（8 步闭环）
+## Troubleshooting
 
-```bash
-# 1. 日常使用自动收集轨迹（无需手动操作）
+Check status:
 
-# 2. 导入外部日志扩充数据
-python -m pysrc.openclaw_importer ~/.openclaw/sessions/
-
-# 3. 构建 SFT + DPO 训练集
-python -m pysrc.training_data_pipeline \
-    --openclaw-dir ~/.openclaw/sessions/ \
-    --output-dir .training_data
-
-# 4. QLoRA 微调基座模型
-python -m pysrc.qlora_trainer \
-    --mode sft --dataset .training_data/sft_sharegpt.jsonl \
-    --base-model Qwen/Qwen2.5-7B-Instruct \
-    --output-dir .models/companion/checkpoint
-
-# 5. 合并 LoRA + 导出 GGUF
-python -m pysrc.gguf_exporter merge \
-    --base-model Qwen/Qwen2.5-7B-Instruct \
-    --lora-adapter .models/companion/checkpoint \
-    --output .models/companion/model.gguf --quantize q4_k_m
-
-# 6. 启动 llama.cpp
-python -m pysrc.gguf_exporter launch --gguf-path .models/companion/model.gguf
-
-# 7. 在 model.toml 启用
-# [companion_model]
-# enabled = true
-
-# 8. 启动 OpenMegatron — 伴生模型自动接管简单任务
+```bat
+start.bat health
 ```
 
-## 文档
+Read logs:
 
-- [完整技术文档 (CLAUDE.md)](CLAUDE.md)
-- [中文文档](README_CN.md)
-- [GitHub](https://github.com/GodOn514/openMegatron)
+```text
+.runtime/
+```
+
+Restart:
+
+```bat
+start.bat stop
+start.bat
+```
+
+## DOI
+
+Zenodo DOI:
+
+https://doi.org/10.5281/zenodo.20711569
+
