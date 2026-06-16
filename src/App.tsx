@@ -38,13 +38,12 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { CitationGraph, parseCitationMermaid } from './components/citation-graph/index.tsx';
 import type { CitationEdge, CitationNode } from './components/citation-graph/index.tsx';
+import { MainChat } from './components/Chat.tsx';
 
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000';
 const HISTORY_KEY = 'megatron_chat_history';
 
 import SkillEditorModal from './components/SkillEditorModal.tsx';
-import ChatSearch from './components/ChatSearch.tsx';
-import MultiSessionTabs from './components/MultiSessionTabs.tsx';
 const WORKSPACE_KEY = 'megatron_workspace_state_v1';
 const TASK_QUEUE_KEY = 'megatron_task_queue_v1';
 const DEFAULT_PROJECT_TITLE = 'Local Workspace';
@@ -958,6 +957,7 @@ export default function App() {
   const activeMember = activeMembers.find((member) => member.id === activeConversation?.activeUserId) || activeMembers[0] || { id: 'local-user', name: 'Owner', color: MEMBER_COLORS[0] };
   const activeSessionId = getConversationSessionId(activeConversation || workspace.activeConversationId);
   const activeChatLoading = runningConversationIds.includes(workspace.activeConversationId);
+  const backendStarting = false;
   const activeTasks = useMemo(() => taskQueue.filter((task) => task.status === 'active').sort((a, b) => b.updatedAt - a.updatedAt), [taskQueue]);
   const completedTasks = useMemo(() => taskQueue.filter((task) => task.status === 'completed').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20), [taskQueue]);
   const conversationNavItems = useMemo(() => buildConversationNavItems(messages, lang), [messages, lang]);
@@ -1479,6 +1479,7 @@ export default function App() {
         members={activeMembers}
         activeMemberId={activeMember.id}
         isChatLoading={activeChatLoading}
+        backendStarting={backendStarting}
         skillDraft={skillDraft}
         modelProviders={modelProviders}
         modelSelection={modelSelection}
@@ -1491,6 +1492,21 @@ export default function App() {
         onToggleLang={() => setLang((current) => (current === 'zh' ? 'en' : 'zh'))}
         onToggleLeft={() => setLeftSidebarOpen((current) => !current)}
         onToggleRight={() => setRightPanelOpen((current) => !current)}
+        conversations={projectConversations}
+        activeConversationId={workspace.activeConversationId}
+        onCreateConversation={handleCreateConversation}
+        onDeleteConversation={handleDeleteConversation}
+        onRenameConversation={(id, title) => {
+          setWorkspace(prev => ({
+            ...prev,
+            conversations: { ...prev.conversations, [id]: { ...prev.conversations[id], title } },
+          }));
+        }}
+        onSwitchConversation={(id) => {
+          setWorkspace(prev => ({ ...prev, activeConversationId: id }));
+        }}
+        chatSearchMessages={chatSearchMessages}
+        setChatSearchScrollTo={setChatSearchScrollTo}
       />
 
       {rightPanelOpen && <button aria-label="Close monitor overlay" className="fixed inset-0 z-30 bg-black/35 xl:hidden" onClick={() => setRightPanelOpen(false)} />}
@@ -1915,157 +1931,6 @@ function SkillChip({ icon, label, onClick }: { icon: React.ReactNode; label: str
       {icon}
       <span className="truncate">{label}</span>
     </button>
-  );
-}
-
-function MainChat({
-  t,
-  lang,
-  messages,
-  activeProjectTitle,
-  activeConversationTitle,
-  members,
-  activeMemberId,
-  isChatLoading,
-  skillDraft,
-  modelProviders,
-  modelSelection,
-  onSelectModel,
-  onSelectMember,
-  onAddMember,
-  onPrompt,
-  onSendMessage,
-  onClearHistory,
-  onToggleLang,
-  onToggleLeft,
-  onToggleRight,
-}: {
-  t: ConfigText;
-  lang: Lang;
-  messages: Message[];
-  activeProjectTitle: string;
-  activeConversationTitle: string;
-  members: ChatMember[];
-  activeMemberId: string;
-  isChatLoading: boolean;
-  skillDraft: SkillDraft | null;
-  modelProviders: ModelProviderOption[];
-  modelSelection: ModelSelection;
-  onSelectModel: (selection: ModelSelection) => void;
-  onSelectMember: (memberId: string) => void;
-  onAddMember: () => void;
-  onPrompt: (value: string) => void;
-  onSendMessage: (value: string) => void;
-  onClearHistory: () => void;
-  onToggleLang: () => void;
-  onToggleLeft: () => void;
-  onToggleRight: () => void;
-}) {
-  const [inputValue, setInputValue] = useState('');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    window.setTimeout(() => {
-      const anchorId = getHashAnchor();
-      if (anchorId && document.getElementById(anchorId)) return;
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    }, 30);
-  }, [messages, isChatLoading]);
-
-  useEffect(() => {
-    if (!skillDraft) return;
-    setInputValue(skillDraft.text);
-    window.setTimeout(() => {
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(skillDraft.text.length, skillDraft.text.length);
-    }, 0);
-  }, [skillDraft]);
-
-  const submit = () => {
-    if (!inputValue.trim() || isChatLoading) return;
-    onSendMessage(inputValue);
-    setInputValue('');
-  };
-
-  return (
-    <main className="flex min-w-0 flex-1 flex-col">
-      <header className="flex h-16 shrink-0 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-panel)] px-3 sm:px-4">
-        <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-          <button data-testid="sidebar-toggle" className="rounded-lg p-2 text-[var(--text-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--text-main)] md:hidden" onClick={onToggleLeft} aria-label="Open sidebar">
-            <Menu className="h-5 w-5" />
-          </button>
-          <div className="hidden h-9 w-9 place-items-center rounded-lg bg-[var(--bg-soft)] text-[var(--accent)] sm:grid">
-            <LayoutDashboard className="h-5 w-5" />
-          </div>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">{lang === 'zh' ? '智能体控制台' : 'Agent Console'}</div>
-            <div className="truncate text-xs text-[var(--text-muted)]">
-              {activeProjectTitle} / {activeConversationTitle}
-            </div>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
-          <ChatSearch messages={chatSearchMessages} onJumpToMessage={(id) => setChatSearchScrollTo(id)} />
-          <MemberPicker lang={lang} members={members} activeMemberId={activeMemberId} onSelect={onSelectMember} onAdd={onAddMember} />
-          <ModelPicker lang={lang} providers={modelProviders} selection={modelSelection} onSelect={onSelectModel} />
-          <IconButton testId="clear-history" title={lang === 'zh' ? '清空历史' : 'Clear history'} onClick={onClearHistory}>
-            <Trash2 className="h-4 w-4" />
-          </IconButton>
-          <IconButton testId="lang-toggle" title={lang === 'zh' ? '切换语言' : 'Switch language'} onClick={onToggleLang}>
-            <Languages className="h-4 w-4" />
-          </IconButton>
-          <IconButton testId="runtime-toggle" title={lang === 'zh' ? '运行状态' : 'Runtime'} onClick={onToggleRight}>
-            <PanelRightClose className="h-4 w-4" />
-          </IconButton>
-        </div>
-      </header>
-
-      <div data-chat-scroll-container className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
-        <div className="mx-auto flex max-w-4xl flex-col gap-5">
-          {messages.length === 0 ? (
-            <EmptyChat lang={lang} onPrompt={onPrompt} />
-          ) : (
-            messages.map((msg) =>
-              msg.role === 'user' ? (
-                <UserMessage key={msg.id} anchorId={getMessageAnchorId(msg.id)} content={msg.content} userName={msg.userName} />
-              ) : (
-                <AgentMessage key={msg.id} lang={lang} anchorId={getMessageAnchorId(msg.id)} traceAnchorId={getTraceAnchorId(msg.id)} thoughts={msg.thoughts} isStreaming={msg.isStreaming}>
-                  {msg.content}
-                </AgentMessage>
-              ),
-            )
-          )}
-          <div ref={messagesEndRef} className="h-1" />
-        </div>
-      </div>
-
-      <div className="shrink-0 border-t border-[var(--border)] bg-[var(--bg-panel)] px-4 py-4 md:px-8">
-        <div className="mx-auto max-w-4xl">
-          <div className="flex items-end gap-3 rounded-lg border border-[var(--border-strong)] bg-white p-2 shadow-sm">
-            <textarea
-              ref={textareaRef}
-              value={inputValue}
-              onChange={(event) => setInputValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              placeholder={t.inputPlace}
-              rows={1}
-              disabled={isChatLoading}
-              className="max-h-32 min-h-11 flex-1 resize-none bg-transparent px-2 py-2.5 text-sm leading-6 outline-none placeholder:text-[var(--text-muted)]"
-            />
-            <button className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-[var(--accent)] text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:bg-[var(--disabled)]" disabled={isChatLoading || !inputValue.trim()} onClick={submit} title={lang === 'zh' ? '发送' : 'Send'}>
-              <Send className="h-4 w-4" />
-            </button>
-          </div>
-          <div className="mt-2 text-center text-xs text-[var(--text-muted)]">{t.inputHint}</div>
-        </div>
-      </div>
-    </main>
   );
 }
 

@@ -979,6 +979,118 @@ class RAGIngestTool(BaseTool):
             return json.dumps({"status": "error", "message": str(e)})
 
 
+class ImportLogsTool(BaseTool):
+    """Import training data from external agent logs (Claude Code, Codex, OpenClaw)."""
+
+    def __init__(self, agent):
+        self.name = "import_training_logs"
+        self.description = (
+            "Import agent trajectories from external log sources: "
+            "Claude Code transcripts, Codex logs, and OpenClaw/Hermes sessions. "
+            "These trajectories are used to train the companion reward model."
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "enum": ["claude_code", "codex", "openclaw", "auto"],
+                    "description": "Log source to import. auto scans all known locations.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Custom path to logs. If omitted, uses default locations.",
+                },
+            },
+        }
+        self.agent = agent
+
+    async def execute(self, source: str = "auto", path: str = None,
+                      session_id: str = None):
+        imported = {"text": 0, "visual": 0, "errors": []}
+
+        if source in ("auto", "claude_code"):
+            claude_dir = path or os.path.expanduser("~/.claude/projects/")
+            if os.path.isdir(claude_dir):
+                try:
+                    from claude_code_parser import ClaudeCodeParser
+                    parser = ClaudeCodeParser()
+                    turns = parser.parse_directory(claude_dir)
+                    trajs = parser.to_trajectories(turns, source="claude_code")
+                    store = getattr(self.agent, '_trajectory_store', None)
+                    if store:
+                        for t in trajs:
+                            try:
+                                store.store(t)
+                                imported["text"] += 1
+                            except Exception:
+                                pass
+                except Exception as e:
+                    imported["errors"].append(f"claude_code: {e}")
+
+        if source in ("auto", "openclaw"):
+            oc_dir = path or os.path.expanduser("~/.openclaw/sessions/")
+            if os.path.isdir(oc_dir):
+                try:
+                    from openclaw_importer import OpenClawImporter
+                    importer = OpenClawImporter()
+                    result = importer.parse_directory(oc_dir)
+                    store = getattr(self.agent, '_trajectory_store', None)
+                    for t in result.get("text_trajectories", []):
+                        try:
+                            store.store(t)
+                            imported["text"] += 1
+                        except Exception:
+                            pass
+                    try:
+                        from visual_trajectory_store import VisualTrajectoryStore
+                        vs = VisualTrajectoryStore()
+                        for t in result.get("visual_trajectories", []):
+                            try:
+                                vs.store(t)
+                                imported["visual"] += 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception as e:
+                    imported["errors"].append(f"openclaw: {e}")
+
+        if source in ("auto", "codex"):
+            codex_dir = path or os.path.expanduser("~/.codex/logs/")
+            if os.path.isdir(codex_dir):
+                try:
+                    from trajectory_importer import TrajectoryImporter
+                    importer = TrajectoryImporter()
+                    trajs = importer.parse_path(codex_dir, format="codex", source="codex")
+                    store = getattr(self.agent, '_trajectory_store', None)
+                    if store:
+                        for t in trajs:
+                            try:
+                                store.store(t)
+                                imported["text"] += 1
+                            except Exception:
+                                pass
+                except Exception as e:
+                    imported["errors"].append(f"codex: {e}")
+
+        # Build training datasets after import
+        dataset_result = None
+        if imported["text"] > 0 or imported["visual"] > 0:
+            try:
+                dataset_result = self.agent._build_training_datasets()
+            except Exception:
+                pass
+
+        return json.dumps({
+            "status": "success",
+            "imported_text": imported["text"],
+            "imported_visual": imported["visual"],
+            "errors": imported["errors"],
+            "datasets_built": dataset_result is not None,
+        }, ensure_ascii=False)
+
+
 class ScreenshotTool(BaseTool):
     """Capture the screen and return a data URI for multimodal LLM input."""
 

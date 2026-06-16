@@ -64,6 +64,7 @@ from skill import (
     ProposeEvolutionTool, OpenAPIBridge, MCPServerBridge, SmartSkillAdapterTool,
     RAGSearchTool, RAGIngestTool,
     ScreenshotTool, ExecuteGUIActionTool,
+    ImportLogsTool,
 )
 
 try:
@@ -282,6 +283,17 @@ class AgentContextManager:
     async def start_background_services(self):
         """Start auto-retrain daemon, task-queue broadcaster, and other
         long-running background services.  Call once after configure_llm()."""
+        # Import external logs (Claude Code / Codex / OpenClaw)
+        try:
+            imported = self._import_external_logs()
+            if imported["text"] > 0 or imported["visual"] > 0:
+                logger.info(
+                    "External logs imported: %d text + %d visual trajectories",
+                    imported["text"], imported["visual"],
+                )
+        except Exception as e:
+            logger.debug("External log import skipped: %s", e)
+
         cfg = self.config.get('auto_retrain', {})
         if cfg.get('enabled', False):
             interval = cfg.get('interval_seconds', 600)
@@ -737,7 +749,8 @@ class YuanGeAgent:
             RunSkillScriptTool, ReloadSkillsTool, SaveAsSkillTool, ScheduleTaskTool,
             PromoteScriptToSkillTool, ProposeEvolutionTool, BackupSkillTool, RestoreSkillTool, GitResetSkillTool,
             RAGSearchTool, RAGIngestTool,
-            ScreenshotTool, ExecuteGUIActionTool
+            ScreenshotTool, ExecuteGUIActionTool,
+            ImportLogsTool,
         ]:
             self.tool_manager.register(tool_cls(self))
 
@@ -961,6 +974,13 @@ class YuanGeAgent:
                                 'AutoRetrain: threshold reached (%d/%d new), starting retrain...',
                                 new_count, total,
                             )
+                            # Build training datasets before retraining
+                            dataset_result = self._build_training_datasets()
+                            if dataset_result:
+                                logger.info(
+                                    'Training datasets ready: %s',
+                                    dataset_result,
+                                )
                             retrain_loop.trigger_retrain_async()
                     except Exception as e:
                         logger.warning('AutoRetrain daemon tick error: %s', e)
@@ -969,6 +989,125 @@ class YuanGeAgent:
             logger.info('AutoRetrain daemon started (interval=%ss)', interval)
         except Exception as e:
             logger.debug('AutoRetrain daemon skipped: %s', e)
+
+    def _import_external_logs(self):
+        """Scan and import Codex/ClaudeCode/OpenClaw logs on startup.
+
+        Called once during agent initialization. Scans common log directories
+        and imports any new trajectories into the stores.
+        """
+        imported = {"text": 0, "visual": 0}
+
+        # 1. Claude Code logs (~/.claude/projects/)
+        claude_dir = os.path.expanduser("~/.claude/projects/")
+        if os.path.isdir(claude_dir):
+            try:
+                from claude_code_parser import ClaudeCodeParser
+                parser = ClaudeCodeParser()
+                turns = parser.parse_directory(claude_dir)
+                trajs = parser.to_trajectories(turns, source="claude_code")
+                store = getattr(self, '_trajectory_store', None)
+                if store and trajs:
+                    for t in trajs:
+                        try:
+                            store.store(t)
+                            imported["text"] += 1
+                        except Exception:
+                            pass
+                logger.info("Imported %d Claude Code trajectories", len(trajs))
+            except Exception as e:
+                logger.debug("Claude Code import skipped: %s", e)
+
+        # 2. OpenClaw logs (~/.openclaw/sessions/)
+        openclaw_dir = os.path.expanduser("~/.openclaw/sessions/")
+        if os.path.isdir(openclaw_dir):
+            try:
+                from openclaw_importer import OpenClawImporter
+                importer = OpenClawImporter()
+                result = importer.parse_directory(openclaw_dir)
+                text_store = getattr(self, '_trajectory_store', None)
+                if text_store and result.get("text_trajectories"):
+                    for t in result["text_trajectories"]:
+                        try:
+                            text_store.store(t)
+                            imported["text"] += 1
+                        except Exception:
+                            pass
+                # Visual store may not be initialized
+                try:
+                    from visual_trajectory_store import VisualTrajectoryStore
+                    vs = VisualTrajectoryStore()
+                    if result.get("visual_trajectories"):
+                        for t in result["visual_trajectories"]:
+                            try:
+                                vs.store(t)
+                                imported["visual"] += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                logger.info(
+                    "Imported %d text + %d visual OpenClaw trajectories",
+                    len(result.get("text_trajectories", [])),
+                    len(result.get("visual_trajectories", [])),
+                )
+            except Exception as e:
+                logger.debug("OpenClaw import skipped: %s", e)
+
+        # 3. Codex logs (~/.codex/logs/ or ./trajectory/codex/)
+        codex_dirs = [
+            os.path.expanduser("~/.codex/logs/"),
+            os.path.join(str(BASE_DIR.parent), ".trajectory", "codex"),
+        ]
+        for codex_dir in codex_dirs:
+            if os.path.isdir(codex_dir):
+                try:
+                    from trajectory_importer import TrajectoryImporter
+                    importer = TrajectoryImporter()
+                    trajs = importer.parse_path(codex_dir, format="codex", source="codex")
+                    store = getattr(self, '_trajectory_store', None)
+                    if store and trajs:
+                        for t in trajs:
+                            try:
+                                store.store(t)
+                                imported["text"] += 1
+                            except Exception:
+                                pass
+                    logger.info("Imported %d Codex trajectories from %s", len(trajs), codex_dir)
+                except Exception as e:
+                    logger.debug("Codex import skipped (%s): %s", codex_dir, e)
+
+        if imported["text"] > 0 or imported["visual"] > 0:
+            logger.info(
+                "External log import complete: %d text + %d visual trajectories",
+                imported["text"], imported["visual"],
+            )
+        return imported
+
+    def _build_training_datasets(self):
+        """Build SFT/DPO training datasets from accumulated trajectories.
+
+        Called by the auto-retrain loop when enough data is available.
+        """
+        try:
+            from training_data_pipeline import TrainingDataPipeline
+            pipeline = TrainingDataPipeline(
+                text_store=getattr(self, '_trajectory_store', None),
+                visual_store=getattr(self, '_visual_store', None),
+            )
+            result = pipeline.run_full_pipeline(
+                output_dir=".training_data",
+                min_quality=0.3,
+                min_reward_delta=0.15,
+            )
+            logger.info(
+                "Training datasets built: %d SFT + %d DPO examples",
+                result.get("sft_count", 0), result.get("dpo_count", 0),
+            )
+            return result
+        except Exception as e:
+            logger.debug("Training dataset build skipped: %s", e)
+            return None
 
     def configure_llm(self, provider: str = None, model: str = None):
         provider_id = str(provider or self.llm_provider or self.config.get("llm_provider", "openai")).strip().lower()
@@ -1469,6 +1608,17 @@ class YuanGeAgent:
     async def start_background_services(self):
         """Start auto-retrain daemon, task-queue broadcaster, and other
         long-running background services.  Call once after configure_llm()."""
+        # Import external logs (Claude Code / Codex / OpenClaw)
+        try:
+            imported = self._import_external_logs()
+            if imported["text"] > 0 or imported["visual"] > 0:
+                logger.info(
+                    "External logs imported: %d text + %d visual trajectories",
+                    imported["text"], imported["visual"],
+                )
+        except Exception as e:
+            logger.debug("External log import skipped: %s", e)
+
         cfg = self.config.get('auto_retrain', {})
         if cfg.get('enabled', False):
             interval = cfg.get('interval_seconds', 600)
@@ -3590,6 +3740,7 @@ class YuanGeAgent:
                 **self._build_skill_route_trace(routing_input, ranked_skills, selected_skills, skill_budget)
             })
         skill_instructions = self._build_skill_instructions(selected_skills)
+        plan_hint = self._build_plan_hint(routing_input, selected_skills)
         task_trace = {
             "session_id": session_id,
             "user_goal": user_input,
@@ -3654,7 +3805,6 @@ class YuanGeAgent:
         static_system = self._build_static_system_prompt(domain)
         # Adapt system prompt to model tier
         static_system = adapt_system_rules(self.tier_config, static_system)
-        plan_hint = self._build_plan_hint(routing_input, selected_skills)
         dynamic_system = self._build_dynamic_system_prompt(
             allowed_paths_str,
             core_mem_str,
@@ -3775,13 +3925,37 @@ class YuanGeAgent:
                         "content_preview": (msg.content or "")[:200]
                     })
             else:
-                msgs.append(msg)
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                }
+                if msg.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        tc.model_dump(exclude_none=True) if hasattr(tc, "model_dump") else {
+                            "id": getattr(tc, "id", ""),
+                            "type": getattr(tc, "type", "function"),
+                            "function": {
+                                "name": getattr(getattr(tc, "function", None), "name", ""),
+                                "arguments": getattr(getattr(tc, "function", None), "arguments", "{}"),
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ]
+                msgs.append(assistant_msg)
             current_tool_calls = list(textual_tool_calls or msg.tool_calls or [])
             if current_tool_calls:
                 task_completed = False
                 ordered_tool_calls = []
                 tool_tasks = []
                 delayed_system_messages = []
+
+                def blackboard_step(step_id: str):
+                    if not blackboard:
+                        return None
+                    try:
+                        return blackboard._get(step_id)
+                    except KeyError:
+                        return None
 
                 async def execute_one_tool_call(tc):
                     started_perf = time.perf_counter()
@@ -3859,21 +4033,23 @@ class YuanGeAgent:
                     if self.broadcast_event:
                         await self.broadcast_event("tool_start", {"name": tc.function.name, "arguments": tc.function.arguments, "session_id": session_id})
                     # ── Blackboard: transition from plan → execute on first tool call ──
-                    if blackboard and blackboard._get("understand") and blackboard._get("understand").status.value == "in_progress":
+                    understand_step = blackboard_step("understand")
+                    acquire_step = blackboard_step("acquire")
+                    if blackboard and understand_step and understand_step.status.value == "in_progress":
                         blackboard.complete("understand", summary="任务理解完成，开始执行")
-                        if blackboard._get("plan"):
+                        if blackboard_step("plan"):
                             blackboard.start("plan")
                             blackboard.complete("plan", summary=f"选定技能: {', '.join(list(selected_skills.keys())[:3])}")
-                        if blackboard._get("execute"):
+                        if blackboard_step("execute"):
                             blackboard.start("execute")
                         if self.broadcast_event:
                             await self.broadcast_event("blackboard_update", {
                                 "session_id": session_id,
                                 "blackboard": blackboard.to_dict(),
                             })
-                    elif blackboard and blackboard._get("acquire") and blackboard._get("acquire").status.value == "in_progress":
+                    elif blackboard and acquire_step and acquire_step.status.value == "in_progress":
                         blackboard.complete("acquire", summary="输入数据获取完成")
-                        if blackboard._get("transform"):
+                        if blackboard_step("transform"):
                             blackboard.start("transform")
                         if self.broadcast_event:
                             await self.broadcast_event("blackboard_update", {
@@ -4673,20 +4849,117 @@ if FASTAPI_AVAILABLE:
             db = self._memory_db()
             if not db:
                 return {"status": "error", "message": self.agent_startup_error or "memory database unavailable"}
-            deleted = {"episodic_memory": 0, "topic_index": 0, "memory_links": 0, "memory_evolution_log": 0, "redis_core": 0, "neo4j": 0}
+            clear_node_kinds = [
+                "memory",
+                "memory_card",
+                "rag_entity",
+                "document",
+                "community",
+                "paper",
+                "author",
+                "venue",
+                "literature_review",
+                "claim",
+                "evidence",
+                "artifact",
+                "entity",
+            ]
+            deleted = {
+                "episodic_memory": 0,
+                "topic_index": 0,
+                "memory_links": 0,
+                "memory_evolution_log": 0,
+                "memory_hyperedge_members": 0,
+                "memory_hyperedges": 0,
+                "ontology_nodes": 0,
+                "rag_documents": 0,
+                "rag_chunks": 0,
+                "rag_communities": 0,
+                "redis_memory_keys": 0,
+                "neo4j": 0,
+            }
             if getattr(db, "pg_pool", None):
                 async with db.pg_pool.acquire() as conn:
                     async with conn.transaction():
-                        deleted["memory_links"] = self._command_count(await conn.execute("DELETE FROM memory_links"))
-                        deleted["memory_evolution_log"] = self._command_count(await conn.execute("DELETE FROM memory_evolution_log"))
+                        deleted["memory_links"] = self._command_count(await conn.execute(
+                            """
+                            WITH doomed AS (
+                                SELECT id FROM episodic_memory
+                                UNION SELECT id FROM rag_documents
+                                UNION SELECT id FROM rag_chunks
+                                UNION SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+                            )
+                            DELETE FROM memory_links
+                            WHERE source_id IN (SELECT id FROM doomed)
+                               OR target_id IN (SELECT id FROM doomed)
+                            """,
+                            clear_node_kinds,
+                        ))
+                        deleted["memory_evolution_log"] = self._command_count(await conn.execute(
+                            """
+                            WITH doomed AS (
+                                SELECT id FROM episodic_memory
+                                UNION SELECT id FROM rag_documents
+                                UNION SELECT id FROM rag_chunks
+                                UNION SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+                            )
+                            DELETE FROM memory_evolution_log
+                            WHERE source_id IN (SELECT id FROM doomed)
+                               OR target_id IN (SELECT id FROM doomed)
+                            """,
+                            clear_node_kinds,
+                        ))
+                        deleted["memory_hyperedge_members"] = self._command_count(await conn.execute(
+                            """
+                            DELETE FROM memory_hyperedge_members
+                            WHERE node_id IN (
+                                SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+                            )
+                            """,
+                            clear_node_kinds,
+                        ))
+                        deleted["memory_hyperedges"] = self._command_count(await conn.execute(
+                            """
+                            DELETE FROM memory_hyperedges h
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM memory_hyperedge_members m WHERE m.hyperedge_id = h.id
+                            )
+                            """
+                        ))
                         deleted["topic_index"] = self._command_count(await conn.execute("DELETE FROM topic_index"))
+                        deleted["rag_chunks"] = self._command_count(await conn.execute("DELETE FROM rag_chunks"))
+                        deleted["rag_documents"] = self._command_count(await conn.execute("DELETE FROM rag_documents"))
+                        deleted["rag_communities"] = self._command_count(await conn.execute("DELETE FROM rag_communities"))
                         deleted["episodic_memory"] = self._command_count(await conn.execute("DELETE FROM episodic_memory"))
+                        deleted["ontology_nodes"] = self._command_count(await conn.execute(
+                            "DELETE FROM ontology_nodes WHERE kind = ANY($1::text[])",
+                            clear_node_kinds,
+                        ))
             if self.agent and getattr(self.agent, "ctx", None):
-                deleted["redis_core"] = await self._delete_redis_patterns(self.agent.ctx.redis, ["core_memory:*"])
+                deleted["redis_memory_keys"] = await self._delete_redis_patterns(
+                    self.agent.ctx.redis,
+                    ["core_memory:*", "rag:cache:*", "vec:cache:*", "graph:*"],
+                )
+                cache_engine = getattr(db, "cache_engine", None)
+                if cache_engine and hasattr(cache_engine, "clear"):
+                    cache_engine.clear()
             if getattr(db, "neo4j", None):
                 try:
                     async with db.neo4j.session() as session:
-                        result = await session.run("MATCH (n) DETACH DELETE n")
+                        result = await session.run(
+                            """
+                            MATCH (n)
+                            WHERE n.kind IN $kinds
+                               OR any(label IN labels(n) WHERE label IN [
+                                   'Memory', 'MemoryRecord', 'MemoryCard',
+                                   'RAGEntity', 'Document', 'Community',
+                                   'Paper', 'Author', 'Venue', 'LiteratureReview',
+                                   'Claim', 'Evidence', 'Artifact', 'Entity'
+                               ])
+                            DETACH DELETE n
+                            """,
+                            kinds=clear_node_kinds,
+                        )
                         summary = await result.consume()
                         deleted["neo4j"] = int(getattr(summary.counters, "nodes_deleted", 0) or 0)
                 except Exception as exc:

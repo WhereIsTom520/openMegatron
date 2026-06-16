@@ -294,26 +294,58 @@ function Ensure-DockerRuntime {
     }
 
     Write-Info 'Checking Docker databases'
+
+    # Quick check: are database ports already reachable? If so, skip Docker.
+    $pgPort = 5432
+    $redisPort = 6379
+    $neo4jPort = 7687
+    $pgOk = Test-PortOpen $pgPort
+    $redisOk = Test-PortOpen $redisPort
+    $neo4jOk = Test-PortOpen $neo4jPort
+
+    if ($pgOk -and $redisOk -and $neo4jOk) {
+        Write-Ok "All database ports reachable (PG:$pgPort Redis:$redisPort Neo4j:$neo4jPort)"
+        return
+    }
+
     $docker = Get-DockerCommand
     if (-not $docker) {
         if (Wake-DockerDesktop) {
-            for ($i = 1; $i -le 30; $i++) {
+            Write-Info 'Waiting for Docker Desktop to start (max 60s)...'
+            for ($i = 1; $i -le 20; $i++) {
                 Start-Sleep -Seconds 3
                 $docker = Get-DockerCommand
                 if ($docker) { break }
-                Write-Host "      waiting for Docker ($($i * 3)/90 sec)..."
+                if ($i % 4 -eq 0) { Write-Host "      waiting for Docker ($($i * 3)/60 sec)..." }
             }
         }
     }
     if (-not $docker) {
-        Write-Fail 'Docker is not running. Start Docker Desktop, then run start.bat again.'
-        Start-Process 'https://www.docker.com/products/docker-desktop/' | Out-Null
-        throw 'Docker unavailable'
+        Write-Warn 'Docker is not available — databases may be running externally'
+        Write-Warn "If you have PostgreSQL, Redis, and Neo4j running elsewhere,"
+        Write-Warn "configure their ports in pysrc\model.toml and continue."
+        Write-Warn ''
+        $proceed = Read-Host 'Continue without Docker? [Y/n]'
+        if ($proceed -ne '' -and $proceed -notmatch '^[yY]') {
+            throw 'Startup cancelled by user'
+        }
+        Write-Warn 'Proceeding without Docker. Make sure databases are running externally.'
+        return
     }
 
     $modelToml = Join-Path $ScriptRoot 'pysrc\model.toml'
     if ($BackendPort -gt 0) { $env:MEGATRON_BACKEND_PORT = "$BackendPort" }
-    Invoke-WithLog -File $Python -Arguments @((Join-Path $ScriptRoot 'scripts\runtime_setup.py'), '--toml', $modelToml, '--runtime-dir', $RuntimeDir, '--mode', 'API') -Label 'runtime setup'
+    try {
+        Invoke-WithLog -File $Python -Arguments @((Join-Path $ScriptRoot 'scripts\runtime_setup.py'), '--toml', $modelToml, '--runtime-dir', $RuntimeDir, '--mode', 'API') -Label 'runtime setup'
+    } catch {
+        Write-Warn 'Runtime setup failed — databases may not be ready.'
+        Write-Warn 'If databases are running externally, you can ignore this warning.'
+        Write-Warn ''
+        $proceed = Read-Host 'Continue anyway? [Y/n]'
+        if ($proceed -ne '' -and $proceed -notmatch '^[yY]') {
+            throw 'Startup cancelled by user'
+        }
+    }
     Write-Ok 'Docker databases are ready'
 }
 

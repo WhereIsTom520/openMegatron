@@ -14,6 +14,7 @@ pysrc/workspace/
 
 # Runtime state, logs, screenshots, and local process files
 .runtime/
+.blackboard/
 .trajectory/
 outputs/
 log/

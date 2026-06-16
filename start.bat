@@ -43,4 +43,10 @@ echo   start.bat install     Create venv and install Python/Node packages
 echo   start.bat test        Run project tests
 echo   start.bat menu        Show menu
 echo.
+echo   Options (pass through to start.ps1):
+echo     -SkipDocker          Skip Docker database setup
+echo     -NoBrowser           Don't open browser on startup
+echo     -BackendPort 8001    Use custom backend port
+echo     -FrontendPort 3001   Use custom frontend port
+echo.
 exit /b 0

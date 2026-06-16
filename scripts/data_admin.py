@@ -27,6 +27,29 @@ CONVERSATION_PATTERNS = [
     "chat:private:*",
 ]
 
+MEMORY_REDIS_PATTERNS = [
+    "core_memory:*",
+    "rag:cache:*",
+    "vec:cache:*",
+    "graph:*",
+]
+
+MEMORY_CLEAR_ONTOLOGY_KINDS = [
+    "memory",
+    "memory_card",
+    "rag_entity",
+    "document",
+    "community",
+    "paper",
+    "author",
+    "venue",
+    "literature_review",
+    "claim",
+    "evidence",
+    "artifact",
+    "entity",
+]
+
 
 def load_config(path: Path) -> dict:
     if not path.exists():
@@ -85,16 +108,89 @@ async def delete_redis_patterns(config: dict, patterns: Iterable[str]) -> int:
 
 
 async def clear_postgres_memory(config: dict) -> dict:
-    deleted = {}
+    deleted = {
+        "memory_links": 0,
+        "memory_evolution_log": 0,
+        "memory_hyperedge_members": 0,
+        "memory_hyperedges": 0,
+        "topic_index": 0,
+        "rag_chunks": 0,
+        "rag_documents": 0,
+        "rag_communities": 0,
+        "episodic_memory": 0,
+        "ontology_nodes": 0,
+    }
+
+    async def execute_delete(conn, key: str, sql: str, *args) -> None:
+        try:
+            deleted[key] = command_count(await conn.execute(sql, *args))
+        except Exception as exc:
+            deleted[key] = 0
+            print(f"[WARN] Skipped {key}: {exc}")
+
     conn = await asyncpg.connect(postgres_dsn(config))
     try:
-        async with conn.transaction():
-            for table in ("memory_links", "memory_evolution_log", "topic_index", "episodic_memory"):
-                try:
-                    deleted[table] = command_count(await conn.execute(f"DELETE FROM {table}"))
-                except Exception as exc:
-                    deleted[table] = 0
-                    print(f"[WARN] Skipped {table}: {exc}")
+        await execute_delete(
+            conn,
+            "memory_links",
+            """
+            WITH doomed AS (
+                SELECT id FROM episodic_memory
+                UNION SELECT id FROM rag_documents
+                UNION SELECT id FROM rag_chunks
+                UNION SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+            )
+            DELETE FROM memory_links
+            WHERE source_id IN (SELECT id FROM doomed)
+               OR target_id IN (SELECT id FROM doomed)
+            """,
+            MEMORY_CLEAR_ONTOLOGY_KINDS,
+        )
+        await execute_delete(
+            conn,
+            "memory_evolution_log",
+            """
+            WITH doomed AS (
+                SELECT id FROM episodic_memory
+                UNION SELECT id FROM rag_documents
+                UNION SELECT id FROM rag_chunks
+                UNION SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+            )
+            DELETE FROM memory_evolution_log
+            WHERE source_id IN (SELECT id FROM doomed)
+               OR target_id IN (SELECT id FROM doomed)
+            """,
+            MEMORY_CLEAR_ONTOLOGY_KINDS,
+        )
+        await execute_delete(
+            conn,
+            "memory_hyperedge_members",
+            """
+            DELETE FROM memory_hyperedge_members
+            WHERE node_id IN (
+                SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+            )
+            """,
+            MEMORY_CLEAR_ONTOLOGY_KINDS,
+        )
+        await execute_delete(
+            conn,
+            "memory_hyperedges",
+            """
+            DELETE FROM memory_hyperedges h
+            WHERE NOT EXISTS (
+                SELECT 1 FROM memory_hyperedge_members m WHERE m.hyperedge_id = h.id
+            )
+            """,
+        )
+        for table in ("topic_index", "rag_chunks", "rag_documents", "rag_communities", "episodic_memory"):
+            await execute_delete(conn, table, f"DELETE FROM {table}")
+        await execute_delete(
+            conn,
+            "ontology_nodes",
+            "DELETE FROM ontology_nodes WHERE kind = ANY($1::text[])",
+            MEMORY_CLEAR_ONTOLOGY_KINDS,
+        )
     finally:
         await conn.close()
     return deleted
@@ -108,7 +204,20 @@ async def clear_neo4j_memory(config: dict) -> int:
     driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
     try:
         async with driver.session() as session:
-            result = await session.run("MATCH (n) DETACH DELETE n")
+            result = await session.run(
+                """
+                MATCH (n)
+                WHERE n.kind IN $kinds
+                   OR any(label IN labels(n) WHERE label IN [
+                       'Memory', 'MemoryRecord', 'MemoryCard',
+                       'RAGEntity', 'Document', 'Community',
+                       'Paper', 'Author', 'Venue', 'LiteratureReview',
+                       'Claim', 'Evidence', 'Artifact', 'Entity'
+                   ])
+                DETACH DELETE n
+                """,
+                kinds=MEMORY_CLEAR_ONTOLOGY_KINDS,
+            )
             summary = await result.consume()
             return int(getattr(summary.counters, "nodes_deleted", 0) or 0)
     finally:
@@ -364,9 +473,9 @@ async def main() -> int:
         except Exception as exc:
             result["neo4j_error"] = str(exc)
             print(f"[WARN] Neo4j clear skipped: {exc}")
-        redis_core_deleted = await delete_redis_patterns(config, ["core_memory:*"])
-        result["redis_core_memory_keys"] = redis_core_deleted
-        print(f"[OK] Cleared Redis core memory keys: {redis_core_deleted}")
+        redis_memory_deleted = await delete_redis_patterns(config, MEMORY_REDIS_PATTERNS)
+        result["redis_memory_keys"] = redis_memory_deleted
+        print(f"[OK] Cleared Redis memory/cache keys: {redis_memory_deleted}")
 
     print(json.dumps({"status": "success", "result": result}, ensure_ascii=False))
     return 0

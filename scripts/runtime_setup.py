@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import os
 import re
 import subprocess
@@ -94,6 +95,34 @@ def tcp_open(port: int, timeout: float = 1.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def postgres_protocol_ready(port: int) -> bool:
+    try:
+        import asyncpg
+    except Exception:
+        return tcp_open(port, timeout=2.0)
+
+    async def _probe() -> bool:
+        conn = None
+        try:
+            conn = await asyncpg.connect(
+                host="127.0.0.1",
+                port=int(port),
+                user="root",
+                password="root",
+                database="root",
+                timeout=5,
+            )
+            return await conn.fetchval("SELECT 1") == 1
+        except Exception as exc:
+            print(f"[WARN] PostgreSQL protocol probe failed: {exc}")
+            return False
+        finally:
+            if conn is not None:
+                await conn.close()
+
+    return bool(asyncio.run(_probe()))
 
 
 def try_docker_base_cmd() -> list[str] | None:
@@ -338,16 +367,27 @@ def wait_for_services(docker_cmd: list[str], ports: dict[str, int]) -> None:
     # Also verify the host port is actually accepting TCP connections
     # (Docker port mapping can take a few seconds after the container is ready)
     wait_for(lambda: tcp_open(ports["postgres"], timeout=2.0), f"PostgreSQL TCP port {ports['postgres']}", 15, delay=2.0)
+    try:
+        wait_for(lambda: postgres_protocol_ready(ports["postgres"]), "PostgreSQL protocol", 3, delay=2.0)
+    except RuntimeError:
+        print("[WARN] PostgreSQL TCP port is open but protocol handshake failed; restarting container...")
+        run(docker_cmd + ["restart", "megatron_postgres"], timeout=30)
+        wait_for(lambda: run(docker_cmd + ["exec", "megatron_postgres", "pg_isready", "-U", "root"], timeout=10).returncode == 0, "PostgreSQL (container)", db_wait)
+        wait_for(lambda: tcp_open(ports["postgres"], timeout=2.0), f"PostgreSQL TCP port {ports['postgres']}", 15, delay=2.0)
+        wait_for(lambda: postgres_protocol_ready(ports["postgres"]), "PostgreSQL protocol", 10, delay=2.0)
     wait_for(lambda: run(docker_cmd + ["exec", "megatron_redis", "redis-cli", "-a", "root", "ping"], timeout=10).returncode == 0, "Redis", redis_wait)
 
     def neo4j_ready() -> bool:
-        if not tcp_open(ports["neo4j_http"], timeout=1.0):
+        if not tcp_open(ports["neo4j_bolt"], timeout=1.0):
             return False
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{ports['neo4j_http']}", timeout=2).close()
-        except Exception:
-            return False
-        return True
+        return run(
+            docker_cmd + [
+                "exec", "megatron_neo4j",
+                "cypher-shell", "-u", "neo4j", "-p", "root",
+                "RETURN 1 AS ok",
+            ],
+            timeout=15,
+        ).returncode == 0
 
     wait_for(neo4j_ready, "Neo4j", neo4j_wait, delay=3.0)
 
