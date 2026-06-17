@@ -2,63 +2,37 @@
 
 OpenMegatron is a local AI agent workbench for chat, tool use, long-term memory, research retrieval, code tasks, GUI automation, and trajectory-driven companion-model learning.
 
-The main rule is simple: **on Windows, start with `start.bat`. Do not manually start every component unless you are debugging.**
+**Start on Windows with `start.bat`.** The launcher prepares the Python environment, frontend dependencies, Docker services, backend API, frontend dev server, and port fallback automatically.
 
 [English](README.md) | [中文](README_CN.md)
 
-## One-Click Start
+## Quick Start
 
-### 1. Download
-
-Download the source code from the GitHub Release:
-
-https://github.com/WhereIsTom520/openMegatron/releases/tag/v1.0.0
-
-Unzip it and open the `openMegatron` folder.
-
-### 2. Configure a Model
-
-Edit:
-
-```text
-pysrc/model.toml
-```
-
-Add your provider, API key, base URL, and model name.
-
-### 3. Start
-
-Double-click:
-
-```text
-start.bat
-```
-
-Or run:
+### Windows one-click start
 
 ```bat
 start.bat
 ```
 
-The launcher handles:
-
-- Python virtual environment
-- Python dependencies
-- frontend dependencies
-- Docker databases
-- backend server
-- frontend server
-- port conflict detection
-
-Open the URL printed by the launcher, usually:
+Then open the URL printed by the launcher, usually:
 
 ```text
 http://localhost:3000
 ```
 
-If port `3000` is busy, the launcher automatically tries `3001`, `3002`, and so on.
+If port `3000` is busy, the launcher tries `3001`, `3002`, and later ports automatically.
 
-## Common Commands
+### First model configuration
+
+On first launch, `start.ps1` creates `pysrc/model.toml` from `pysrc/model.example.toml` when needed. Edit:
+
+```text
+pysrc/model.toml
+```
+
+Set your active provider, API key, base URL, and model name. OpenAI-compatible providers, DeepSeek, Qwen, Moonshot, Zhipu, MiniMax, Stepfun, SiliconFlow, OpenRouter, and local compatible endpoints can be configured there.
+
+### Common commands
 
 ```bat
 start.bat             Start backend and frontend
@@ -66,10 +40,10 @@ start.bat health      Check service status
 start.bat stop        Stop services
 start.bat install     Reinstall dependencies
 start.bat test        Run tests
-start.bat menu        Open menu
+start.bat menu        Open the launcher menu
 ```
 
-Advanced options:
+Useful options:
 
 ```bat
 start.bat -NoBrowser
@@ -78,28 +52,16 @@ start.bat -BackendPort 8001
 start.bat -FrontendPort 3001
 ```
 
-## What It Does
+## Six Subsystems
 
-- **Agent chat workbench**: web UI plus backend tool execution.
-- **Multi-model support**: OpenAI-compatible APIs, DeepSeek, local llama.cpp, and similar endpoints.
-- **Skill system**: code, research, office, media, and agent-orchestration skill packs.
-- **Long-term memory**: Redis + PostgreSQL/pgvector + Neo4j.
-- **RAG retrieval**: document ingestion, vector search, graph search, and citation-style answers.
-- **Companion-model loop**: collect task traces, train reward/scoring models, improve routing and quality checks.
-- **GUI automation**: screenshot, click, type, scroll, drag, and related computer-control actions.
-- **External log ingestion**: External Agent JSONL, external text-agent compatible logs, OpenClaw/Hermes trajectories.
-- **Evaluation scaffolding**: ablation experiments for RAG, memory, and companion AI components.
+OpenMegatron is organized around six major subsystems:
 
-## What The Companion Model Means
-
-The companion model is not presented as a full replacement for cloud models. In the current 1.0 release, it is a local learning loop around OpenMegatron:
-
-1. collect task traces and tool-call outcomes;
-2. train reward/scoring models;
-3. use those scores for task evaluation, routing, retraining, and regression checks;
-4. optionally extend toward SFT/DPO/QLoRA workflows for local models.
-
-Its value is that OpenMegatron can learn from your own task history instead of relying only on fixed rules.
+1. **Interaction and API subsystem**: React/TypeScript frontend, FastAPI HTTP endpoints, WebSocket/event streaming, runtime status, and channel-facing request handling.
+2. **Agent orchestration and model dispatch subsystem**: the core agent loop, service registry, request planning, model provider configuration, and lite/standard/advanced model-tier routing.
+3. **Skill execution subsystem**: versioned skill packs under `pysrc/skills/` for code, research, office, media, monitoring, and agent orchestration tasks.
+4. **Memory, RAG, and knowledge graph subsystem**: Redis chat history, PostgreSQL/pgvector retrieval, Neo4j-backed graph memory, ontology entities, literature graphs, and citation-style retrieval.
+5. **Companion learning and evaluation subsystem**: trajectory collection/import, reward/scoring models, auto-retraining hooks, regression guards, ablation experiments, and learning dashboard support.
+6. **Automation and external integration subsystem**: GUI actions, screen capture, desktop/browser automation skills, Feishu/WeCom-style adapters, log ingestion, and runtime safety checks.
 
 ## Project Layout
 
@@ -107,16 +69,42 @@ Its value is that OpenMegatron can learn from your own task history instead of r
 openMegatron/
 ├── start.bat              Windows one-click launcher
 ├── start.ps1              launcher implementation
+├── docker-compose.yml     Redis, PostgreSQL/pgvector, Neo4j
 ├── pysrc/                 Python backend
+│   ├── api.py             FastAPI API and channel gateway
 │   ├── agent.py           core agent loop
-│   ├── skill.py           tool and skill registry
-│   ├── memory.py          long-term memory and RAG storage
-│   ├── reward_*.py        reward model and training
+│   ├── model_tier.py      model tier dispatch
+│   ├── skill.py           skill discovery and loading
+│   ├── skill_router.py    request-to-skill routing
+│   ├── memory.py          memory and RAG storage
+│   ├── graph_engine.py    graph algorithms
+│   ├── literature_graph.py
 │   ├── trajectory_*.py    trace collection and import
-│   └── skills/            skill packs
+│   ├── reward_*.py        reward model and training
+│   └── skills/            versioned skill packs
 ├── src/                   React frontend
 ├── tests/                 Python tests
-└── docker-compose.yml     Redis/PostgreSQL/Neo4j
+└── docs/                  documentation and figures
+```
+
+## Development
+
+Install runtime dependencies:
+
+```bat
+python scripts/runtime_setup.py --toml pysrc/model.toml
+```
+
+Run tests:
+
+```bat
+python -m pytest tests/ -v
+```
+
+Build the frontend:
+
+```bat
+npm run build
 ```
 
 ## Troubleshooting
@@ -127,17 +115,29 @@ Check status:
 start.bat health
 ```
 
-Read logs:
+Read runtime logs:
 
 ```text
 .runtime/
 ```
 
-Restart:
+Restart cleanly:
 
 ```bat
 start.bat stop
 start.bat
+```
+
+## License and Attribution
+
+OpenMegatron is free for personal, academic, and commercial use, including modification and redistribution, **with attribution required**. See [LICENSE.txt](LICENSE.txt) for the full terms.
+
+Suggested attribution:
+
+```text
+Built with OpenMegatron by WhereIsTom520.
+https://github.com/WhereIsTom520/openMegatron
+DOI: https://doi.org/10.5281/zenodo.20711569
 ```
 
 ## DOI
@@ -145,4 +145,3 @@ start.bat
 Zenodo DOI:
 
 https://doi.org/10.5281/zenodo.20711569
-

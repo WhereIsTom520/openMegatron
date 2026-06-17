@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use OpenMegatron, please cite it and include attribution."
+title: "OpenMegatron"
+type: software
+authors:
+  - name: "WhereIsTom520"
+repository-code: "https://github.com/WhereIsTom520/openMegatron"
+url: "https://github.com/WhereIsTom520/openMegatron"
+doi: "10.5281/zenodo.20711569"
+date-released: "2026-06-17"
+license: "LicenseRef-OpenMegatron-Attribution-1.0"
