@@ -38,6 +38,8 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { CitationGraph, parseCitationMermaid } from './components/citation-graph/index.tsx';
 import type { CitationEdge, CitationNode } from './components/citation-graph/index.tsx';
+import { OntologyGraph } from './components/ontology-graph/index.tsx';
+import type { MemoryGraphNode, MemoryGraphEdge, MemoryGraphResponse } from './types.ts';
 import { MainChat } from './components/Chat.tsx';
 
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000';
@@ -775,6 +777,7 @@ export default function App() {
   const [evolutionManagerOpen, setEvolutionManagerOpen] = useState(false);
   const [dataActionMessage, setDataActionMessage] = useState('');
   const [activeBlackboard, setActiveBlackboard] = useState<{steps: Array<{id:string;description:string;status:string;duration_ms:number;strategy:string;result_summary:string;retry_count:number;error:string}>;progress:{total:number;completed:number;failed:number;in_progress:number;pending:number;percent:number};report?:string} | null>(null);
+  const [skillPromotionToast, setSkillPromotionToast] = useState<{goalType: string; chain: string[]; toolCount: number; sessionId: string} | null>(null);
   const [chatSearchMessages, setChatSearchMessages] = useState<Message[]>([]);
   const [chatSearchScrollTo, setChatSearchScrollTo] = useState<string | null>(null);
 
@@ -892,6 +895,31 @@ export default function App() {
                   report: payload.data?.report || payload.report || '',
                 });
               }
+              return;
+            }
+            if (type === 'skill_promotion_candidate') {
+              const goalType = payload.goal_type || 'task';
+              const chain = payload.chain || [];
+              const toolCount = payload.tool_count || chain.length;
+              setSkillPromotionToast({
+                goalType,
+                chain,
+                toolCount,
+                sessionId: sessionId || payload.session_id || '',
+              });
+              // Auto-dismiss after 30 seconds
+              setTimeout(() => setSkillPromotionToast(null), 30000);
+              return;
+            }
+            if (type === 'skill_created') {
+              const skillName = payload.skill_name || '';
+              if (skillName) {
+                setDataActionMessage(lang === 'zh'
+                  ? `✅ 技能 "${skillName}" 已创建`
+                  : `✅ Skill "${skillName}" created`);
+                setTimeout(() => setDataActionMessage(''), 5000);
+              }
+              setSkillPromotionToast(null);
               return;
             }
           } catch {
@@ -1522,6 +1550,55 @@ export default function App() {
       </aside>
 
       {confirmReq && <ConfirmModal lang={lang} req={confirmReq} onAction={handleConfirmAction} />}
+      {skillPromotionToast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+          background: 'rgba(30,30,40,0.95)', border: '1px solid rgba(255,255,255,0.15)',
+          borderRadius: 12, padding: '16px 20px', maxWidth: 420,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)', backdropFilter: 'blur(12px)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <span style={{ fontSize: 20 }}>&#9889;</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, color: '#e0e0e0', marginBottom: 4 }}>
+                {lang === 'zh' ? '保存为可复用技能？' : 'Save as reusable skill?'}
+              </div>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>
+                {lang === 'zh'
+                  ? `工作流 "${skillPromotionToast.goalType}" 使用了 ${skillPromotionToast.toolCount} 个工具调用，是否保存为技能以便复用？`
+                  : `Workflow "${skillPromotionToast.goalType}" used ${skillPromotionToast.toolCount} tool calls. Save for reuse?`}
+              </div>
+              {skillPromotionToast.chain.length > 0 && (
+                <div style={{ fontSize: 11, color: '#777', marginBottom: 10, fontFamily: 'monospace' }}>
+                  {skillPromotionToast.chain.join(' → ')}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => setSkillPromotionToast(null)} style={{
+                  padding: '4px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.2)',
+                  background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 12,
+                }}>
+                  {lang === 'zh' ? '忽略' : 'Dismiss'}
+                </button>
+                <button onClick={async () => {
+                  setSkillPromotionToast(null);
+                  setDataActionMessage(lang === 'zh' ? '⏳ 等待确认...' : '⏳ Waiting for confirmation...');
+                  setTimeout(() => setDataActionMessage(''), 3000);
+                }} style={{
+                  padding: '4px 12px', borderRadius: 6, border: 'none',
+                  background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', color: '#fff',
+                  cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                }}>
+                  {lang === 'zh' ? '创建技能' : 'Create Skill'}
+                </button>
+              </div>
+            </div>
+            <button onClick={() => setSkillPromotionToast(null)} style={{
+              background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 16, padding: 0,
+            }}>&times;</button>
+          </div>
+        </div>
+      )}
       {skillEditorOpen && <SkillEditorModal lang={lang} onClose={() => setSkillEditorOpen(false)} />}
       {evolutionManagerOpen && <EvolutionManagerModal lang={lang} onClose={() => setEvolutionManagerOpen(false)} />}
       {memoryManagerOpen && <MemoryManagerModal lang={lang} onClose={() => setMemoryManagerOpen(false)} />}
@@ -3370,6 +3447,10 @@ function MemoryManagerModal({ lang, onClose }: { lang: Lang; onClose: () => void
   const [status, setStatus] = useState('');
   const [editingId, setEditingId] = useState('');
   const [draftText, setDraftText] = useState('');
+  const [view, setView] = useState<'list' | 'graph'>('list');
+  const [graphNodes, setGraphNodes] = useState<MemoryGraphNode[]>([]);
+  const [graphEdges, setGraphEdges] = useState<MemoryGraphEdge[]>([]);
+  const [graphLoading, setGraphLoading] = useState(false);
 
   const loadRecords = useCallback(async () => {
     setLoading(true);
@@ -3395,6 +3476,26 @@ function MemoryManagerModal({ lang, onClose }: { lang: Lang; onClose: () => void
   useEffect(() => {
     loadRecords();
   }, [loadRecords]);
+
+  const loadGraph = useCallback(async () => {
+    setGraphLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/memory/hypergraph?limit=200`, { cache: 'no-store' });
+      const data: MemoryGraphResponse = await res.json();
+      if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+      setGraphNodes((data.nodes || []).map(n => ({ ...n, kind: (n as any).kind || n.type || 'other' })));
+      setGraphEdges(data.edges || []);
+    } catch {
+      setGraphNodes([]);
+      setGraphEdges([]);
+    } finally {
+      setGraphLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (view === 'graph') loadGraph();
+  }, [view, loadGraph]);
 
   const startEdit = (record: MemoryRecord) => {
     setEditingId(record.id);
@@ -3466,7 +3567,10 @@ function MemoryManagerModal({ lang, onClose }: { lang: Lang; onClose: () => void
               <span>{lang === 'zh' ? '长期记忆管理' : 'Memory Manager'}</span>
             </div>
             <div className="mt-1 text-xs text-[var(--text-muted)]">
-              {lang === 'zh' ? `共 ${total} 条，当前显示 ${records.length} 条` : `${total} total, showing ${records.length}`}
+              {view === 'list'
+                ? (lang === 'zh' ? `共 ${total} 条，当前显示 ${records.length} 条` : `${total} total, showing ${records.length}`)
+                : (lang === 'zh' ? `图谱节点 ${graphNodes.length} 个 · 关系 ${graphEdges.length} 条` : `${graphNodes.length} nodes · ${graphEdges.length} edges`)
+              }
             </div>
           </div>
           <button className="grid h-8 w-8 place-items-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--text-main)]" onClick={onClose} aria-label="Close memory manager">
@@ -3488,18 +3592,54 @@ function MemoryManagerModal({ lang, onClose }: { lang: Lang; onClose: () => void
             />
           </div>
           <div className="flex shrink-0 gap-2">
-            <button className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--border)] px-3 text-sm hover:bg-[var(--bg-soft)]" onClick={loadRecords} disabled={loading}>
-              <RefreshCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              {lang === 'zh' ? '刷新' : 'Refresh'}
-            </button>
-            <button className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--danger-soft)] px-3 text-sm text-[var(--danger)] hover:bg-[var(--danger-soft)]" onClick={clearMemory}>
-              <Eraser className="h-4 w-4" />
-              {lang === 'zh' ? '清空记忆' : 'Clear memory'}
-            </button>
+            <div className="grid grid-cols-2 rounded-lg border border-[var(--border)] bg-white p-1 text-xs">
+              <button
+                type="button"
+                className={`rounded-md px-3 py-1.5 transition ${view === 'list' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--text-main)]'}`}
+                onClick={() => setView('list')}
+              >
+                {lang === 'zh' ? '列表' : 'List'}
+              </button>
+              <button
+                type="button"
+                className={`rounded-md px-3 py-1.5 transition ${view === 'graph' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--text-main)]'}`}
+                onClick={() => setView('graph')}
+              >
+                {lang === 'zh' ? '图谱' : 'Graph'}
+              </button>
+            </div>
+            {view === 'list' && (
+              <button className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--border)] px-3 text-sm hover:bg-[var(--bg-soft)]" onClick={loadRecords} disabled={loading}>
+                <RefreshCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                {lang === 'zh' ? '刷新' : 'Refresh'}
+              </button>
+            )}
+            {view === 'list' && (
+              <button className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--danger-soft)] px-3 text-sm text-[var(--danger)] hover:bg-[var(--danger-soft)]" onClick={clearMemory}>
+                <Eraser className="h-4 w-4" />
+                {lang === 'zh' ? '清空记忆' : 'Clear memory'}
+              </button>
+            )}
+            {view === 'graph' && (
+              <button className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--border)] px-3 text-sm hover:bg-[var(--bg-soft)]" onClick={loadGraph} disabled={graphLoading}>
+                <RefreshCcw className={`h-4 w-4 ${graphLoading ? 'animate-spin' : ''}`} />
+                {lang === 'zh' ? '刷新图谱' : 'Refresh graph'}
+              </button>
+            )}
           </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {view === 'graph' ? (
+            graphLoading ? (
+              <div className="rounded-lg border border-dashed border-[var(--border-strong)] p-8 text-center text-sm text-[var(--text-muted)]">
+                {lang === 'zh' ? '加载图谱中...' : 'Loading graph...'}
+              </div>
+            ) : (
+              <OntologyGraph nodes={graphNodes} edges={graphEdges} width={900} height={500} />
+            )
+          ) : (
+            <>
           {status ? <div className="mb-3 rounded-lg border border-[var(--border)] bg-[var(--bg-soft)] px-3 py-2 text-sm text-[var(--text-muted)]">{status}</div> : null}
           {records.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[var(--border-strong)] p-8 text-center text-sm text-[var(--text-muted)]">
@@ -3554,6 +3694,8 @@ function MemoryManagerModal({ lang, onClose }: { lang: Lang; onClose: () => void
                 );
               })}
             </div>
+          )}
+            </>
           )}
         </div>
       </div>

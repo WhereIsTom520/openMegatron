@@ -31,8 +31,8 @@ try:
 except ImportError:
     FASTAPI_AVAILABLE = False
 
-from pysrc.memory_ontology import default_memory_ontology
-from pysrc.memory_ontology import ontology_node_id
+from memory_ontology import default_memory_ontology
+from memory_ontology import ontology_node_id
 
 import logging
 logger = logging.getLogger(__name__)
@@ -45,16 +45,28 @@ def error_response(message: str, status: int = 400) -> dict:
     """Return the legacy API error payload shape."""
     return {"error": message, "status": status}
 
-from pysrc.evolution import EvolutionStore
+from evolution import EvolutionStore
 
 try:
-    from pysrc.integrations.feishu_bot import FeishuBotAdapter, FeishuConfig
+    from integrations.feishu_bot import FeishuBotAdapter, FeishuConfig
 except ImportError:
     FeishuBotAdapter = None
     FeishuConfig = None
 
 try:
-    from pysrc.memory import MemoryRecallEngine
+    from integrations.wecom_bot import WecomBotAdapter, WecomConfig
+except ImportError:
+    WecomBotAdapter = None
+    WecomConfig = None
+
+try:
+    from integrations.qq_bot import QQBotAdapter, QQBotConfig
+except ImportError:
+    QQBotAdapter = None
+    QQBotConfig = None
+
+try:
+    from memory import MemoryRecallEngine
 except ImportError:
     MemoryRecallEngine = None
 
@@ -102,18 +114,30 @@ class IMGateway:
         self.adapters = {
             "webhook": WebhookChannelAdapter(),
             "feishu": FeishuBotAdapter(FeishuConfig.from_config(config), logger),
+            "wecom": WecomBotAdapter(WecomConfig.from_config(config), logger),
+            "qq": QQBotAdapter(QQBotConfig.from_config(config), logger),
         }
         self.app = FastAPI(title="Agent IM Gateway", lifespan=self.lifespan_handler)
         origins = self.gateway_cfg.get("allowed_origins", ["*"])
         self.app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
         self.app.post("/webhook")(self.handle_webhook)
         self.app.post("/integrations/feishu/events")(self.handle_feishu_events)
+        self.app.post("/integrations/wecom/events")(self.handle_wecom_events)
 
     @asynccontextmanager
     async def lifespan_handler(self, app: FastAPI):
         self.agent = await self.agent_factory()
         logger.info("Gateway and Agent Initialized.")
+        # Start QQ WebSocket connection
+        qq_adapter = self.adapters.get("qq")
+        if qq_adapter:
+            await qq_adapter.start(self.agent)
+            logger.info("QQ bot WebSocket started.")
         yield
+        # Stop QQ WebSocket connection
+        if qq_adapter:
+            await qq_adapter.stop()
+            logger.info("QQ bot WebSocket stopped.")
         if self.agent:
             await self.agent.close()
             logger.info("Gateway and Agent Shutdown safely.")
@@ -129,6 +153,10 @@ class IMGateway:
 
     async def handle_feishu_events(self, request: Request, background_tasks: BackgroundTasks):
         adapter = self.adapters["feishu"]
+        return await adapter.handle_callback(request, self.agent, background_tasks)
+
+    async def handle_wecom_events(self, request: Request, background_tasks: BackgroundTasks):
+        adapter = self.adapters["wecom"]
         return await adapter.handle_callback(request, self.agent, background_tasks)
 
     async def process_and_reply(self, adapter: ChannelAdapter, message: dict):
@@ -162,6 +190,7 @@ class AgentAPI:
         self.app.get("/model_options")(self.model_options_endpoint)
         self.app.get("/validate_link")(self.validate_link_endpoint)
         self.app.get("/evolution/policy")(self.evolution_policy_endpoint)
+        self.app.get("/evolution/visualization")(self.evolution_visualization_endpoint)  # 新增
         self.app.get("/evolution/proposals")(self.list_evolution_proposals_endpoint)
         self.app.post("/evolution/proposals")(self.create_evolution_proposal_endpoint)
         self.app.post("/evolution/apply")(self.apply_evolution_proposal_endpoint)
@@ -181,14 +210,31 @@ class AgentAPI:
         self.app.get("/skills/read")(self.read_skill_file_endpoint)
         self.app.post("/skills/write")(self.write_skill_file_endpoint)
         self.app.post("/skills/rollback")(self.rollback_skill_file_endpoint)
-
-        # RAG endpoints
         self.app.post("/rag/ingest")(self.rag_ingest_endpoint)
         self.app.post("/rag/query")(self.rag_query_endpoint)
         self.app.get("/rag/documents")(self.rag_list_documents_endpoint)
         self.app.delete("/rag/documents/{doc_id}")(self.rag_delete_document_endpoint)
         self.app.get("/rag/communities")(self.rag_list_communities_endpoint)
         self.app.get("/rag/status")(self.rag_status_endpoint)
+
+    def _agent_not_ready_payload(self, lang: str = "en") -> dict:
+        raw_error = self.agent_startup_error or "startup failed"
+        lower = raw_error.lower()
+        missing_key = "missing credentials" in lower or "api_key" in lower or "openai_api_key" in lower
+        if missing_key:
+            answer = (
+                "当前模型厂商还没有配置 API Key。请运行 `start.bat` 并按启动向导选择模型厂商，"
+                "或在 `pysrc/model.toml` 中填写对应 provider 的 `api_key`。"
+                if lang == "zh"
+                else "The selected model provider does not have an API key yet. Run `start.bat` and use the startup setup prompt, "
+                "or add the provider `api_key` in `pysrc/model.toml`."
+            )
+            return {"answer": answer, "executed_tools": [], "status": "missing_provider_key"}
+        return {
+            "answer": f"Backend is running, but the agent is not ready: {raw_error}",
+            "executed_tools": [],
+            "status": "degraded",
+        }
 
 # RAG Endpoints
 
@@ -653,6 +699,44 @@ async def rag_status_endpoint(self, request: Request):
     async def evolution_policy_endpoint(self):
         return {"status": "success", "policy": self.evolution_store.policy()}
 
+    async def evolution_visualization_endpoint(self):
+        """Full evolution system visualization data.
+
+        Returns 4 visualization datasets:
+        - dashboard: Category evolution states + Pareto radar charts
+        - hypergraph: Force-directed ontology graph of evolution entities
+        - causal_forest: Forest plot of causal treatment effects for each promotion
+        - pareto_frontier: 3D projection of the multi-objective Pareto frontier
+        """
+        try:
+            agent = self.agent
+            if not agent or not getattr(agent, '_evolution', None):
+                return {
+                    "status": "success",
+                    "dashboard": {"categories": [], "total_categories": 0, "average_level": 0},
+                    "hypergraph": {"nodes": [], "links": [], "metadata": {}},
+                    "causal_forest": {"rows": [], "summary": {}},
+                    "pareto_frontier": {"points": [], "frontier_size": 0},
+                }
+
+            # Lazy import - visualization is optional dependency
+            from evolution_visualizer import EvolutionVisualizer
+
+            vis = EvolutionVisualizer(agent._evolution)
+            return {
+                "status": "success",
+                "dashboard": vis.dashboard(),
+                "hypergraph": vis.interactive_hypergraph(),
+                "causal_forest": vis.causal_forest_plot(),
+                "pareto_frontier": vis.pareto_3d_projection(),
+            }
+        except ImportError as exc:
+            logger.debug(f"Visualizer not available: {exc}")
+            return {"status": "error", "message": "Evolution visualizer not available"}
+        except Exception as exc:
+            logger.warning(f"Evolution visualization failed: {exc}")
+            return {"status": "error", "message": str(exc)}
+
     async def list_evolution_proposals_endpoint(self, status: str = "", include_content: bool = True):
         try:
             proposals = self.evolution_store.list_proposals(status=status, include_content=include_content)
@@ -811,20 +895,117 @@ async def rag_status_endpoint(self, request: Request):
         db = self._memory_db()
         if not db:
             return {"status": "error", "message": self.agent_startup_error or "memory database unavailable"}
-        deleted = {"episodic_memory": 0, "topic_index": 0, "memory_links": 0, "memory_evolution_log": 0, "redis_core": 0, "neo4j": 0}
+        clear_node_kinds = [
+            "memory",
+            "memory_card",
+            "rag_entity",
+            "document",
+            "community",
+            "paper",
+            "author",
+            "venue",
+            "literature_review",
+            "claim",
+            "evidence",
+            "artifact",
+            "entity",
+        ]
+        deleted = {
+            "episodic_memory": 0,
+            "topic_index": 0,
+            "memory_links": 0,
+            "memory_evolution_log": 0,
+            "memory_hyperedge_members": 0,
+            "memory_hyperedges": 0,
+            "ontology_nodes": 0,
+            "rag_documents": 0,
+            "rag_chunks": 0,
+            "rag_communities": 0,
+            "redis_memory_keys": 0,
+            "neo4j": 0,
+        }
         if getattr(db, "pg_pool", None):
             async with db.pg_pool.acquire() as conn:
                 async with conn.transaction():
-                    deleted["memory_links"] = self._command_count(await conn.execute("DELETE FROM memory_links"))
-                    deleted["memory_evolution_log"] = self._command_count(await conn.execute("DELETE FROM memory_evolution_log"))
+                    deleted["memory_links"] = self._command_count(await conn.execute(
+                        """
+                        WITH doomed AS (
+                            SELECT id FROM episodic_memory
+                            UNION SELECT id FROM rag_documents
+                            UNION SELECT id FROM rag_chunks
+                            UNION SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+                        )
+                        DELETE FROM memory_links
+                        WHERE source_id IN (SELECT id FROM doomed)
+                           OR target_id IN (SELECT id FROM doomed)
+                        """,
+                        clear_node_kinds,
+                    ))
+                    deleted["memory_evolution_log"] = self._command_count(await conn.execute(
+                        """
+                        WITH doomed AS (
+                            SELECT id FROM episodic_memory
+                            UNION SELECT id FROM rag_documents
+                            UNION SELECT id FROM rag_chunks
+                            UNION SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+                        )
+                        DELETE FROM memory_evolution_log
+                        WHERE source_id IN (SELECT id FROM doomed)
+                           OR target_id IN (SELECT id FROM doomed)
+                        """,
+                        clear_node_kinds,
+                    ))
+                    deleted["memory_hyperedge_members"] = self._command_count(await conn.execute(
+                        """
+                        DELETE FROM memory_hyperedge_members
+                        WHERE node_id IN (
+                            SELECT id FROM ontology_nodes WHERE kind = ANY($1::text[])
+                        )
+                        """,
+                        clear_node_kinds,
+                    ))
+                    deleted["memory_hyperedges"] = self._command_count(await conn.execute(
+                        """
+                        DELETE FROM memory_hyperedges h
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM memory_hyperedge_members m WHERE m.hyperedge_id = h.id
+                        )
+                        """
+                    ))
                     deleted["topic_index"] = self._command_count(await conn.execute("DELETE FROM topic_index"))
+                    deleted["rag_chunks"] = self._command_count(await conn.execute("DELETE FROM rag_chunks"))
+                    deleted["rag_documents"] = self._command_count(await conn.execute("DELETE FROM rag_documents"))
+                    deleted["rag_communities"] = self._command_count(await conn.execute("DELETE FROM rag_communities"))
                     deleted["episodic_memory"] = self._command_count(await conn.execute("DELETE FROM episodic_memory"))
+                    deleted["ontology_nodes"] = self._command_count(await conn.execute(
+                        "DELETE FROM ontology_nodes WHERE kind = ANY($1::text[])",
+                        clear_node_kinds,
+                    ))
         if self.agent and getattr(self.agent, "ctx", None):
-            deleted["redis_core"] = await self._delete_redis_patterns(self.agent.ctx.redis, ["core_memory:*"])
+            deleted["redis_memory_keys"] = await self._delete_redis_patterns(
+                self.agent.ctx.redis,
+                ["core_memory:*", "rag:cache:*", "vec:cache:*", "graph:*"],
+            )
+            cache_engine = getattr(db, "cache_engine", None)
+            if cache_engine and hasattr(cache_engine, "clear"):
+                cache_engine.clear()
         if getattr(db, "neo4j", None):
             try:
                 async with db.neo4j.session() as session:
-                    result = await session.run("MATCH (n) DETACH DELETE n")
+                    result = await session.run(
+                        """
+                        MATCH (n)
+                        WHERE n.kind IN $kinds
+                           OR any(label IN labels(n) WHERE label IN [
+                               'Memory', 'MemoryRecord', 'MemoryCard',
+                               'RAGEntity', 'Document', 'Community',
+                               'Paper', 'Author', 'Venue', 'LiteratureReview',
+                               'Claim', 'Evidence', 'Artifact', 'Entity'
+                           ])
+                        DETACH DELETE n
+                        """,
+                        kinds=clear_node_kinds,
+                    )
                     summary = await result.consume()
                     deleted["neo4j"] = int(getattr(summary.counters, "nodes_deleted", 0) or 0)
             except Exception as exc:
@@ -844,7 +1025,7 @@ async def rag_status_endpoint(self, request: Request):
 
     async def get_memory_ontology_endpoint(self):
         """Return the ontology definition (node_types + relation_types)."""
-        from pysrc.memory_ontology import default_memory_ontology
+        from memory_ontology import default_memory_ontology
         return default_memory_ontology()
 
     async def get_memory_hypergraph_endpoint(self, kind: str = "", limit: int = 200):
@@ -1105,11 +1286,7 @@ async def rag_status_endpoint(self, request: Request):
     async def chat_endpoint(self, request: Request):
         data = await request.json()
         if not self.agent:
-            return {
-                "answer": f"Backend is running, but the agent is not ready: {self.agent_startup_error or 'startup failed'}",
-                "executed_tools": [],
-                "status": "degraded",
-            }
+            return self._agent_not_ready_payload(str(data.get("lang") or "en"))
         session_id = str(data.get("session_id") or "default")
         room_id = str(data.get("room_id") or "").strip()
         user_id = str(data.get("user_id") or "shared").strip() or "shared"

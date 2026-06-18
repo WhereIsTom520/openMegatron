@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -6,7 +6,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from research_common import compact_text, emit, extract_pdf_text, fail, normalize_paper, normalize_papers, openalex_fetch_work, openalex_work_to_paper, parse_params, reading_from_paper
+from research_common import (compact_text, emit, extract_pdf_text, fail, normalize_paper,
+                               normalize_papers, openalex_fetch_work, openalex_work_to_paper,
+                               parse_params, reading_from_paper, lookup_entity_citation,
+                               annotate_entities_with_citations, build_entity_bibliography)
 
 try:
     from bs4 import BeautifulSoup
@@ -391,6 +394,10 @@ def main() -> int:
                     "hyperparams_specified": _has_hyperparams(abstract),
                     "dataset_public": all(d.get("public", False) for d in datasets),
                 },
+                # ── Entity→Citation bindings ──
+                "entity_citations": annotate_entities_with_citations(
+                    abstract + " " + str(p.get("title", ""))
+                ),
             })
         emit({"status": "success", "completed": True, "count": len(results), "methodologies": results})
         return 0

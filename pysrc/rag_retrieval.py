@@ -282,7 +282,7 @@ class GlobalSearcher:
                 result = session.run(
                     """MATCH (e:OntologyNode {kind: 'rag_entity'})
                        WHERE toLower(e.label) CONTAINS toLower($name)
-                       OPTIONAL MATCH (e)-[r:related|part_of|cites|supports|contradicts]-(other:OntologyNode)
+                       OPTIONAL MATCH (e)-[r:related|cites|supports|contradicts]-(other:OntologyNode)
                        RETURN e, r, other
                        LIMIT 20""",
                     name=name,
@@ -308,7 +308,7 @@ class GlobalSearcher:
 
                     # Find chunk references via MENTIONS edges
                     chunk_result = session.run(
-                        """MATCH (e:OntologyNode {kind: 'rag_entity'})-[m:MENTIONS]->(c)
+                        """MATCH (e:OntologyNode {kind: 'rag_entity'})-[m:rag_mentions]->(c)
                            WHERE toLower(e.label) CONTAINS toLower($name)
                            RETURN c.id AS chunk_id, m.confidence AS confidence
                            LIMIT 30""",

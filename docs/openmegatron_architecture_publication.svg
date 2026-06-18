@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080" role="img" aria-labelledby="title desc">
+  <title id="title">OpenMegatron Architecture</title>
+  <desc id="desc">A publication-ready architecture figure for the OpenMegatron modular multi-model agent platform.</desc>
+  <defs>
+    <marker id="arrow-dark" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="#182733"/>
+    </marker>
+    <marker id="arrow-soft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="#6a7680"/>
+    </marker>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#14212b" flood-opacity="0.10"/>
+    </filter>
+    <style>
+      .canvas { fill: #fbfcfd; }
+      .title { font: 700 34px Arial, Helvetica, sans-serif; fill: #14212b; }
+      .caption { font: 400 18px Arial, Helvetica, sans-serif; fill: #55626d; }
+      .group-label { font: 700 15px Arial, Helvetica, sans-serif; fill: #5a6670; text-transform: uppercase; letter-spacing: 1.4px; }
+      .node-title { font: 700 22px Arial, Helvetica, sans-serif; fill: #14212b; }
+      .node-title-small { font: 700 18px Arial, Helvetica, sans-serif; fill: #14212b; }
+      .node-body { font: 400 15px Arial, Helvetica, sans-serif; fill: #465561; }
+      .node-mini { font: 400 13px Arial, Helvetica, sans-serif; fill: #64717b; }
+      .pill-text { font: 700 15px Arial, Helvetica, sans-serif; fill: #1d3446; }
+      .paper { fill: #ffffff; stroke: #d9e0e6; stroke-width: 1.4; rx: 18; filter: url(#soft-shadow); }
+      .panel { fill: #ffffff; stroke: #cfd8e1; stroke-width: 1.5; rx: 12; }
+      .panel-blue { fill: #f4f8fb; stroke: #6c91ad; stroke-width: 1.8; rx: 12; }
+      .panel-green { fill: #f5faf6; stroke: #74a06f; stroke-width: 1.8; rx: 12; }
+      .panel-gold { fill: #fff9ef; stroke: #b88a42; stroke-width: 1.8; rx: 12; }
+      .kernel { fill: #f8fbfd; stroke: #1c526f; stroke-width: 2.8; rx: 18; }
+      .subbox { fill: #ffffff; stroke: #c9d3dc; stroke-width: 1.2; rx: 8; }
+      .flow { fill: none; stroke: #182733; stroke-width: 2.6; marker-end: url(#arrow-dark); }
+      .soft-flow { fill: none; stroke: #6a7680; stroke-width: 2; marker-end: url(#arrow-soft); }
+      .data-flow { fill: none; stroke: #6a7680; stroke-width: 2; stroke-dasharray: 7 7; marker-end: url(#arrow-soft); }
+      .boundary { fill: none; stroke: #dfe5ea; stroke-width: 1.2; stroke-dasharray: 6 8; rx: 16; }
+      .dot { fill: #1c526f; }
+      .dot-green { fill: #5d8c58; }
+      .dot-gold { fill: #a5752f; }
+      .dot-gray { fill: #687680; }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1800" height="1080"/>
+  <rect class="paper" x="68" y="58" width="1664" height="948"/>
+
+  <text class="title" x="126" y="126">OpenMegatron: Modular Multi-Model Agent Platform</text>
+  <text class="caption" x="126" y="158">Control plane, execution skills, adaptive feedback, and persistent knowledge substrate</text>
+
+  <rect class="boundary" x="118" y="210" width="1564" height="650"/>
+  <text class="group-label" x="144" y="242">Online agent request path</text>
+
+  <rect class="panel" x="150" y="305" width="190" height="88"/>
+  <circle class="dot-gray" cx="180" cy="334" r="6"/>
+  <text class="node-title-small" x="198" y="340">Client</text>
+  <text class="node-body" x="180" y="366">Task request</text>
+
+  <rect class="panel-blue" x="430" y="292" width="230" height="114"/>
+  <circle class="dot" cx="462" cy="324" r="6"/>
+  <text class="node-title-small" x="480" y="331">API Gateway</text>
+  <text class="node-body" x="462" y="360">FastAPI endpoints</text>
+  <text class="node-mini" x="462" y="382">validation · structured errors</text>
+
+  <rect class="kernel" x="770" y="240" width="380" height="220"/>
+  <text class="node-title" x="874" y="286">Agent Kernel</text>
+  <text class="node-body" x="844" y="316">central orchestration loop</text>
+  <rect class="subbox" x="808" y="346" width="142" height="58"/>
+  <text class="pill-text" x="842" y="380">routing</text>
+  <rect class="subbox" x="970" y="346" width="142" height="58"/>
+  <text class="pill-text" x="1000" y="380">dispatch</text>
+  <rect class="subbox" x="808" y="418" width="142" height="58"/>
+  <text class="pill-text" x="840" y="452">repair</text>
+  <rect class="subbox" x="970" y="418" width="142" height="58"/>
+  <text class="pill-text" x="1000" y="452">audit</text>
+
+  <rect class="panel-blue" x="1260" y="292" width="230" height="114"/>
+  <circle class="dot" cx="1292" cy="324" r="6"/>
+  <text class="node-title-small" x="1310" y="331">Response</text>
+  <text class="node-body" x="1292" y="360">Answer synthesis</text>
+  <text class="node-mini" x="1292" y="382">result · trace metadata</text>
+
+  <path class="flow" d="M340 349 H430"/>
+  <path class="flow" d="M660 349 H770"/>
+  <path class="flow" d="M1150 349 H1260"/>
+
+  <rect class="panel" x="445" y="545" width="250" height="135"/>
+  <circle class="dot-gray" cx="477" cy="579" r="6"/>
+  <text class="node-title-small" x="495" y="586">Skill Router</text>
+  <text class="node-body" x="477" y="616">feature matching</text>
+  <text class="node-mini" x="477" y="640">confidence scoring</text>
+  <text class="node-mini" x="477" y="662">default fallback</text>
+
+  <rect class="panel" x="730" y="555" width="195" height="115"/>
+  <circle class="dot-gray" cx="760" cy="587" r="6"/>
+  <text class="node-title-small" x="778" y="594">Skill Loader</text>
+  <text class="node-body" x="760" y="624">versioned packs</text>
+  <text class="node-mini" x="760" y="648">SKILL.md · scripts</text>
+
+  <rect class="panel" x="970" y="555" width="210" height="115"/>
+  <circle class="dot-gray" cx="1000" cy="587" r="6"/>
+  <text class="node-title-small" x="1018" y="594">Model Tier</text>
+  <text class="node-body" x="1000" y="624">lite · standard</text>
+  <text class="node-mini" x="1000" y="648">advanced dispatch</text>
+
+  <rect class="panel" x="1225" y="545" width="255" height="135"/>
+  <circle class="dot-gray" cx="1257" cy="579" r="6"/>
+  <text class="node-title-small" x="1275" y="586">Predictive Engine</text>
+  <text class="node-body" x="1257" y="616">history-aware suggestions</text>
+  <text class="node-mini" x="1257" y="640">precomputed feature vectors</text>
+  <text class="node-mini" x="1257" y="662">Jaccard similarity</text>
+
+  <path class="soft-flow" d="M860 460 C780 510 655 520 595 545"/>
+  <path class="soft-flow" d="M695 612 H730"/>
+  <path class="soft-flow" d="M925 612 H970"/>
+  <path class="soft-flow" d="M1180 612 H1225"/>
+  <path class="soft-flow" d="M1352 545 C1305 485 1152 453 1115 425"/>
+
+  <rect class="panel-green" x="330" y="735" width="1085" height="92"/>
+  <text class="node-title-small" x="368" y="774">Executable Skill Plane</text>
+  <text class="node-body" x="368" y="803">code engineering · research workflows · agent orchestration · media generation</text>
+  <text class="node-mini" x="1015" y="803">pysrc/skills/&lt;category&gt;/&lt;skill&gt;-&lt;version&gt;/</text>
+
+  <path class="flow" d="M960 460 C960 585 905 665 875 735"/>
+
+  <rect class="boundary" x="118" y="892" width="1564" height="76"/>
+  <text class="group-label" x="144" y="924">Persistent state and knowledge substrate</text>
+
+  <rect class="panel-gold" x="430" y="904" width="174" height="52"/>
+  <text class="node-body" x="481" y="935">Memory</text>
+  <rect class="panel-gold" x="640" y="904" width="174" height="52"/>
+  <text class="node-body" x="685" y="935">Ontology</text>
+  <rect class="panel-gold" x="850" y="904" width="174" height="52"/>
+  <text class="node-body" x="891" y="935">Graph Engine</text>
+  <rect class="panel-gold" x="1060" y="904" width="174" height="52"/>
+  <text class="node-body" x="1097" y="935">Literature DB</text>
+  <rect class="panel" x="1270" y="904" width="174" height="52"/>
+  <text class="node-body" x="1312" y="935">Cache / Audit</text>
+
+  <path class="data-flow" d="M610 827 C590 862 552 882 517 904"/>
+  <path class="data-flow" d="M760 827 C748 858 735 878 727 904"/>
+  <path class="data-flow" d="M935 827 V904"/>
+  <path class="data-flow" d="M1085 827 C1105 860 1128 880 1147 904"/>
+  <path class="data-flow" d="M1240 827 C1288 855 1330 876 1357 904"/>
+
+  <g transform="translate(122 1006)">
+    <line x1="0" y1="0" x2="72" y2="0" class="flow"/>
+    <text class="node-mini" x="90" y="5">control / execution</text>
+    <line x1="275" y1="0" x2="347" y2="0" class="data-flow"/>
+    <text class="node-mini" x="365" y="5">state / learning / audit</text>
+  </g>
+</svg>

@@ -159,6 +159,11 @@ DEFAULT_MEMORY_ONTOLOGY = {
             "label": "Alternative",
             "description": "An option considered but not chosen in a decision."
         },
+        {
+            "id": "option",
+            "label": "Option",
+            "description": "The chosen option in a decision record."
+        },
 
         {
             "id": "rag_entity",
@@ -215,7 +220,7 @@ DEFAULT_MEMORY_ONTOLOGY = {
             "label": "produces",
             "description": "A workflow or skill produces an artifact or claim.",
             "source_type": "*",
-            "target_type": "artifact"
+            "target_type": "*"
         },
         {
             "id": "uses",
@@ -236,7 +241,7 @@ DEFAULT_MEMORY_ONTOLOGY = {
             "label": "belongs_to",
             "description": "A node belongs to a project, session, owner, or scope.",
             "source_type": "*",
-            "target_type": "owner"
+            "target_type": "*"
         },
         {
             "id": "cites",
@@ -395,6 +400,17 @@ DEFAULT_MEMORY_ONTOLOGY = {
             ]
         },
         {
+            "id": "evolution_event",
+            "label": "Evolution Event",
+            "description": "Records an evolution state transition for a skill category — old level, new level, success rate, and reason.",
+            "roles": [
+                "category",
+                "old_level",
+                "new_level",
+                "outcome"
+            ]
+        },
+        {
             "id": "skill_distillation",
             "label": "Skill Distillation",
             "description": "Connects successful traces, reusable procedure, tests, and the resulting skill.",
@@ -434,6 +450,17 @@ DEFAULT_MEMORY_ONTOLOGY = {
                 "alternative",
                 "project",
                 "session"
+            ]
+        },
+        {
+            "id": "demotion_event",
+            "label": "Demotion Event",
+            "description": "Records a skill demotion event from a higher to a lower evolution level for a category.",
+            "roles": [
+                "category",
+                "old_level",
+                "new_level",
+                "outcome"
             ]
         }
     ]

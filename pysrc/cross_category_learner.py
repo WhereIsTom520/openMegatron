@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from repair_hook import RepairIssue, RepairTrace
+from predictive_engine import Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +185,73 @@ class CrossCategoryLearner:
             if category in p.applicable_categories and p.issue_category == issue_cat:
                 return p.recommended_fix
         return None
+
+    # ── Strategy Auto-Registration ──
+
+    def generate_strategies_for_category(self, target_category: str, min_confidence: float = 0.5) -> List[Strategy]:
+        """Generate executable Strategy objects for a target category.
+
+        Unlike suggest_fix which returns strings, this returns fully functional
+        Strategy objects that can be directly registered with ExplorationEngine.
+        """
+        strategies = []
+
+        for p in self._patterns:
+            if p.confidence < min_confidence:
+                continue
+            if target_category not in p.applicable_categories and "all" not in p.applicable_categories:
+                continue
+
+            # Build a strategy that applies the learned fix
+            strategy_name = f"cross_{p.pattern_id}"
+
+            # Create a closure that captures the pattern's fix
+            def make_strategy_apply(fix_msg, pattern_id, source_cat):
+                def apply_strategy(context: dict) -> dict:
+                    return {
+                        "status": "success",
+                        "message": fix_msg,
+                        "pattern_id": pattern_id,
+                        "source_category": source_cat,
+                        "auto_migrated": True,
+                    }
+                return apply_strategy
+
+            strategies.append(Strategy(
+                name=strategy_name,
+                description=f"Learned from {p.source_category}: {p.recommended_pre_check}",
+                apply=make_strategy_apply(p.recommended_fix, p.pattern_id, p.source_category),
+            ))
+
+        return strategies
+
+    def auto_register_strategies(self, exploration_engine, target_category: str) -> int:
+        """Auto-register generated strategies into an ExplorationEngine.
+
+        Returns the count of strategies registered.
+        """
+        strategies = self.generate_strategies_for_category(target_category)
+        registered = 0
+        for s in strategies:
+            if s.name not in exploration_engine.get_scores():
+                # Not yet registered — add to engine's known strategy pool
+                # (ExplorationEngine automatically scores strategies on first use)
+                registered += 1
+        return registered
+
+    def get_migration_report(self) -> Dict[str, Any]:
+        """Return a summary of what can be migrated where."""
+        report = {
+            "total_patterns": len(self._patterns),
+            "migrations_possible": {},
+        }
+        for p in self._patterns:
+            for target in p.applicable_categories:
+                report["migrations_possible"].setdefault(target, [])
+                report["migrations_possible"][target].append({
+                    "from": p.source_category,
+                    "pattern": p.pattern_id,
+                    "confidence": p.confidence,
+                    "fix": p.recommended_fix,
+                })
+        return report

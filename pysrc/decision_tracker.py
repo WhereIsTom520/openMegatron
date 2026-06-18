@@ -50,15 +50,7 @@ class ConflictResult:
     conflict_pairs: list[dict] = field(default_factory=list)
 
 
-# ── Helper: ontology-stable IDs ───────────────────────
-
-def _onto_id(kind: str, label: str) -> str:
-    """Generate a stable ontology node id from kind + label."""
-    safe_kind = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(kind).strip().lower()).strip("_") or "entity"
-    clean = re.sub(r"\s+", " ", str(label)).strip()
-    digest = hashlib.sha1(clean.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    return f"{safe_kind}:{digest}"
-
+# ── Helper: decision-specific stable ID ─────────────────
 
 def _decision_id(owner_id: str, topic: str, chosen: str) -> str:
     """Stable decision ID — same owner+topic+chosen → same id."""
@@ -117,11 +109,12 @@ class DecisionTracker:
         tags = tags or []
         now_dt = datetime.now(timezone.utc)
 
-        # Stable IDs
+        # Stable IDs — use the canonical ontology_node_id from memory service
+        _oid = self._svc.ontology_node_id
         decision_id = _decision_id(owner_id, topic, chosen)
-        topic_id = _onto_id("topic", topic)
-        chosen_id = _onto_id("option", f"{topic}:{chosen}")
-        owner_node_id = _onto_id("owner", owner_id)
+        topic_id = _oid("topic", topic)
+        chosen_id = _oid("option", f"{topic}:{chosen}")
+        owner_node_id = _oid("owner", owner_id)
 
         if not self._svc:
             raise RuntimeError("DecisionTracker needs a memory_db with .service (ontology methods)")
@@ -144,7 +137,7 @@ class DecisionTracker:
                 },
             )
             await self._svc._upsert_ontology_node(conn, topic_id, "topic", topic, {})
-            await self._svc._upsert_ontology_node(conn, chosen_id, "alternative",
+            await self._svc._upsert_ontology_node(conn, chosen_id, "option",
                 chosen, {"topic": topic, "is_chosen": True},
             )
             await self._svc._upsert_ontology_node(conn, owner_node_id, "owner",
@@ -169,13 +162,26 @@ class DecisionTracker:
             await self._svc._upsert_hyperedge_member(conn, he_id, decision_id, "decision", "decision", 1.0, {"role": "decision"})
             await self._svc._upsert_hyperedge_member(conn, he_id, owner_node_id, "owner", "owner", 1.0, {"owner_name": owner_name or owner_id})
             await self._svc._upsert_hyperedge_member(conn, he_id, topic_id, "topic", "topic", 0.95, {"topic": topic})
-            await self._svc._upsert_hyperedge_member(conn, he_id, chosen_id, "chosen", "alternative", 1.0, {"option": chosen, "is_chosen": True})
+            await self._svc._upsert_hyperedge_member(conn, he_id, chosen_id, "chosen", "option", 1.0, {"option": chosen, "is_chosen": True})
+
+            # Project and session members (defined in decision_record ontology)
+            proj_id = _oid("project", owner_id)
+            await self._svc._upsert_ontology_node(conn, proj_id, "project",
+                f"Project: {owner_id}", {"owner_id": owner_id})
+            await self._svc._upsert_hyperedge_member(conn, he_id, proj_id, "project", "project", 0.9,
+                {"role": "project", "owner_id": owner_id})
+
+            sess_id = _oid("session", session_id)
+            await self._svc._upsert_ontology_node(conn, sess_id, "session",
+                f"Session: {session_id}", {"session_id": session_id})
+            await self._svc._upsert_hyperedge_member(conn, he_id, sess_id, "session", "session", 0.9,
+                {"role": "session", "session_id": session_id})
 
             # 4. Add alternatives as members and ontology nodes
             for alt in alternatives:
                 if alt == chosen:
                     continue
-                alt_id = _onto_id("alternative", f"{topic}:{alt}")
+                alt_id = _oid("alternative", f"{topic}:{alt}")
                 await self._svc._upsert_ontology_node(conn, alt_id, "alternative",
                     alt, {"topic": topic, "is_chosen": False},
                 )
@@ -191,7 +197,7 @@ class DecisionTracker:
                               _j.dumps({"is_chosen": True}))
             for alt in alternatives:
                 if alt != chosen:
-                    alt_id = _onto_id("alternative", f"{topic}:{alt}")
+                    alt_id = _oid("alternative", f"{topic}:{alt}")
                     await conn.execute(sql_link, decision_id, alt_id, "considers", 0.5,
                                       _j.dumps({"is_chosen": False}))
 

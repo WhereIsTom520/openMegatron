@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import io
@@ -1273,6 +1273,497 @@ async def enrich_reference_links(session, papers, *, max_count=12):
     return papers
 
 
+# ═══════════════════════════════════════════════════════════════
+# Entity → Citation Mapping Engine
+# ═══════════════════════════════════════════════════════════════
+# Maps dataset names, model names, and benchmark names to their
+# canonical BibTeX citations so that every mention in a paper
+# can be automatically paired with a formal reference.
+#
+# Sources: PapersWithCode, official publications, community consensus.
+# Format: { canonical_lower_name: { bibtex, doi, url, aliases } }
+
+_ENTITY_CITATIONS: dict[str, dict] = {}
 
 
+def _entity_pattern(name: str) -> re.Pattern[str]:
+    """Match an entity as a standalone token, not as a substring."""
+    return re.compile(r"(?<![A-Za-z0-9])" + re.escape(name.lower()) + r"(?![A-Za-z0-9])")
 
+
+def _build_entity_citations() -> dict[str, dict]:
+    """Lazily build the entity→citation map. Called once on first access."""
+    global _ENTITY_CITATIONS
+    if _ENTITY_CITATIONS:
+        return _ENTITY_CITATIONS
+
+    def _reg(name: str, bibtex: str, doi: str = "", url: str = "", aliases: list[str] | None = None):
+        canonical = name.lower()
+        entry = {
+            "bibtex": bibtex.strip(),
+            "doi": doi,
+            "url": url,
+            "aliases": [a.lower() for a in (aliases or [])],
+            "canonical_name": canonical,
+            "display_name": name,
+        }
+        _ENTITY_CITATIONS[canonical] = entry
+        for a in (aliases or []):
+            _ENTITY_CITATIONS.setdefault(a.lower(), entry)
+
+    # ── Vision datasets ──
+    _reg("ImageNet", """@inproceedings{deng2009imagenet,
+  title={ImageNet: A large-scale hierarchical image database},
+  author={Deng, Jia and Dong, Wei and Socher, Richard and Li, Li-Jia and Li, Kai and Fei-Fei, Li},
+  booktitle={CVPR},
+  year={2009}
+}""", doi="10.1109/CVPR.2009.5206848", aliases=["ImageNet-1K", "ImageNet-21K", "ILSVRC"])
+
+    _reg("CIFAR-10", """@techreport{krizhevsky2009cifar,
+  title={Learning multiple layers of features from tiny images},
+  author={Krizhevsky, Alex and Hinton, Geoffrey},
+  year={2009},
+  institution={University of Toronto}
+}""", aliases=["CIFAR10", "CIFAR-100", "CIFAR100"])
+
+    _reg("MNIST", """@article{lecun1998mnist,
+  title={Gradient-based learning applied to document recognition},
+  author={LeCun, Yann and Bottou, L{\\'e}on and Bengio, Yoshua and Haffner, Patrick},
+  journal={Proceedings of the IEEE},
+  volume={86},
+  number={11},
+  pages={2278--2324},
+  year={1998}
+}""", doi="10.1109/5.726791")
+
+    _reg("COCO", """@inproceedings{lin2014coco,
+  title={Microsoft COCO: Common objects in context},
+  author={Lin, Tsung-Yi and Maire, Michael and Belongie, Serge and Hays, James and Perona, Pietro and Ramanan, Deva and Doll{\\'a}r, Piotr and Zitnick, C Lawrence},
+  booktitle={ECCV},
+  year={2014}
+}""", doi="10.1007/978-3-319-10602-1_48", aliases=["MS-COCO", "Microsoft COCO"])
+
+    _reg("PASCAL VOC", """@article{everingham2010pascal,
+  title={The Pascal Visual Object Classes (VOC) Challenge},
+  author={Everingham, Mark and Van Gool, Luc and Williams, Christopher KI and Winn, John and Zisserman, Andrew},
+  journal={IJCV},
+  volume={88},
+  pages={303--338},
+  year={2010}
+}""", doi="10.1007/s11263-009-0275-4", aliases=["VOC", "PASCAL VOC 2007", "PASCAL VOC 2012"])
+
+    _reg("Cityscapes", """@inproceedings{cordts2016cityscapes,
+  title={The Cityscapes Dataset for Semantic Urban Scene Understanding},
+  author={Cordts, Marius and Omran, Mohamed and Ramos, Sebastian and Rehfeld, Timo and Enzweiler, Markus and Benenson, Rodrigo and Franke, Uwe and Roth, Stefan and Schiele, Bernt},
+  booktitle={CVPR},
+  year={2016}
+}""", doi="10.1109/CVPR.2016.350")
+
+    # ── NLP datasets ──
+    _reg("SQuAD", """@inproceedings{rajpurkar2016squad,
+  title={SQuAD: 100,000+ Questions for Machine Comprehension of Text},
+  author={Rajpurkar, Pranav and Zhang, Jian and Lopyrev, Konstantin and Liang, Percy},
+  booktitle={EMNLP},
+  year={2016}
+}""", doi="10.18653/v1/D16-1264", aliases=["SQuAD 1.1", "SQuAD 2.0"])
+
+    _reg("GLUE", """@inproceedings{wang2018glue,
+  title={GLUE: A Multi-Task Benchmark and Analysis Platform for Natural Language Understanding},
+  author={Wang, Alex and Singh, Amanpreet and Michael, Julian and Hill, Felix and Levy, Omer and Bowman, Samuel R},
+  booktitle={EMNLP},
+  year={2018}
+}""", doi="10.18653/v1/W18-5446", aliases=["SuperGLUE"])
+
+    _reg("MMLU", """@inproceedings{hendrycks2021mmlu,
+  title={Measuring Massive Multitask Language Understanding},
+  author={Hendrycks, Dan and Burns, Collin and Basart, Steven and Zou, Andy and Mazeika, Mantas and Song, Dawn and Steinhardt, Jacob},
+  booktitle={ICLR},
+  year={2021}
+}""", aliases=["Massive Multitask Language Understanding"])
+
+    _reg("HumanEval", """@inproceedings{chen2021humaneval,
+  title={Evaluating Large Language Models Trained on Code},
+  author={Chen, Mark and Tworek, Jerry and Jun, Heewoo and Yuan, Qiming and Pinto, Henrique Ponde de Oliveira and Kaplan, Jared and Edwards, Harri and Burda, Yuri and Joseph, Nicholas and Brockman, Greg and others},
+  booktitle={arXiv},
+  year={2021}
+}""", aliases=["HumanEval-X"])
+
+    _reg("WMT", """@inproceedings{bojar2014wmt,
+  title={Findings of the 2014 Workshop on Statistical Machine Translation},
+  author={Bojar, Ond{\\v{r}}ej and Buck, Christian and Federmann, Christian and Haddow, Barry and Koehn, Philipp and Leveling, Johannes and Monz, Christof and Pecina, Pavel and Post, Matt and Saint-Amand, Herve and others},
+  booktitle={WMT},
+  year={2014}
+}""", aliases=["WMT14", "WMT16", "WMT19", "WMT21"])
+
+    _reg("LibriSpeech", """@inproceedings{panayotov2015librispeech,
+  title={LibriSpeech: An ASR Corpus Based on Public Domain Audio Books},
+  author={Panayotov, Vassil and Chen, Guoguo and Povey, Daniel and Khudanpur, Sanjeev},
+  booktitle={ICASSP},
+  year={2015}
+}""", doi="10.1109/ICASSP.2015.7178964")
+
+    _reg("CommonVoice", """@article{ardila2020commonvoice,
+  title={Common Voice: A Massively-Multilingual Speech Corpus},
+  author={Ardila, Rosana and Branson, Megan and Davis, Kelly and Henretty, Michael and Kohler, Michael and Meyer, Josh and Morais, Reuben and Saunders, Lindsay and Tyers, Francis M and Weber, Gregor},
+  journal={LREC},
+  year={2020}
+}""")
+
+    _reg("XNLI", """@inproceedings{conneau2018xnli,
+  title={XNLI: Evaluating Cross-lingual Sentence Representations},
+  author={Conneau, Alexis and Rinott, Ruty and Lample, Guillaume and Williams, Adina and Bowman, Samuel R and Schwenk, Holger and Stoyanov, Veselin},
+  booktitle={EMNLP},
+  year={2018}
+}""", doi="10.18653/v1/D18-1269")
+
+    _reg("BIG-Bench", """@article{srivastava2022bigbench,
+  title={Beyond the Imitation Game: Quantifying and Extrapolating the Capabilities of Language Models},
+  author={Srivastava, Aarohi and Rastogi, Abhinav and Rao, Abhishek and others},
+  journal={arXiv:2206.04615},
+  year={2022}
+}""", aliases=["BIG-Bench Hard", "BBH"])
+
+    _reg("HellaSwag", """@inproceedings{zellers2019hellaswag,
+  title={HellaSwag: Can a Machine Really Finish Your Sentence?},
+  author={Zellers, Rowan and Holtzman, Ari and Bisk, Yonatan and Farhadi, Ali and Choi, Yejin},
+  booktitle={ACL},
+  year={2019}
+}""", doi="10.18653/v1/P19-1472")
+
+    # ── Medical datasets ──
+    _reg("MIMIC-III", """@article{johnson2016mimiciii,
+  title={MIMIC-III, a freely accessible critical care database},
+  author={Johnson, Alistair EW and Pollard, Tom J and Shen, Lu and Lehman, Li-wei H and Feng, Mengling and Ghassemi, Mohammad and Moody, Benjamin and Szolovits, Peter and Celi, Leo Anthony and Mark, Roger G},
+  journal={Scientific Data},
+  volume={3},
+  year={2016}
+}""", doi="10.1038/sdata.2016.35", aliases=["MIMIC-IV", "MIMIC"])
+
+    _reg("CheXpert", """@inproceedings{irvin2019chexpert,
+  title={CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison},
+  author={Irvin, Jeremy and Rajpurkar, Pranav and Ko, Michael and Yu, Yifan and Ciurea-Ilcus, Silviana and Chute, Chris and Marklund, Henrik and Haghgoo, Behzad and Ball, Robyn and Shpanskaya, Katie and others},
+  booktitle={AAAI},
+  year={2019}
+}""", doi="10.1609/aaai.v33i01.3301590")
+
+    # ── Autonomous driving ──
+    _reg("KITTI", """@inproceedings{geiger2012kitti,
+  title={Are we ready for Autonomous Driving? The KITTI Vision Benchmark Suite},
+  author={Geiger, Andreas and Lenz, Philip and Urtasun, Raquel},
+  booktitle={CVPR},
+  year={2012}
+}""", doi="10.1109/CVPR.2012.6248074")
+
+    _reg("nuScenes", """@inproceedings{caesar2020nuscenes,
+  title={nuScenes: A Multimodal Dataset for Autonomous Driving},
+  author={Caesar, Holger and Bankiti, Varun and Lang, Alex H and Vora, Sourabh and Liong, Venice Erin and Xu, Qiang and Krishnan, Anush and Pan, Yu and Baldan, Giancarlo and Beijbom, Oscar},
+  booktitle={CVPR},
+  year={2020}
+}""", doi="10.1109/CVPR42600.2020.01164")
+
+    _reg("Waymo", """@inproceedings{sun2020waymo,
+  title={Scalability in Perception for Autonomous Driving: Waymo Open Dataset},
+  author={Sun, Pei and Kretzschmar, Henrik and Dotiwalla, Xerxes and Chouard, Aurelien and Patnaik, Vijaysai and Tsui, Paul and Guo, James and Zhou, Yin and Chai, Yuning and Caine, Benjamin and others},
+  booktitle={CVPR},
+  year={2020}
+}""", doi="10.1109/CVPR42600.2020.00252", aliases=["Waymo Open Dataset"])
+
+    # ── Web / text corpora ──
+    _reg("Common Crawl", """@inproceedings{commoncrawl,
+  title={Common Crawl},
+  author={{Common Crawl Foundation}},
+  year={2024},
+  url={https://commoncrawl.org}
+}""", url="https://commoncrawl.org", aliases=["C4", "CommonCrawl"])
+
+    _reg("The Pile", """@article{gao2020pile,
+  title={The Pile: An 800GB Dataset of Diverse Text for Language Modeling},
+  author={Gao, Leo and Biderman, Stella and Black, Sid and Golding, Laurence and Hoppe, Travis and Foster, Charles and Phang, Jason and He, Horace and Thite, Anish and Nabeshima, Noa and others},
+  journal={arXiv:2101.00027},
+  year={2020}
+}""", aliases=["Pile"])
+
+    _reg("Wikipedia", """@misc{wikipedia,
+  title={Wikipedia: The Free Encyclopedia},
+  author={{Wikimedia Foundation}},
+  year={2024},
+  url={https://www.wikipedia.org}
+}""", url="https://www.wikipedia.org")
+
+    _reg("Stack Overflow", """@misc{stackoverflow,
+  title={Stack Overflow},
+  author={{Stack Exchange Inc.}},
+  year={2024},
+  url={https://stackoverflow.com}
+}""", url="https://stackoverflow.com")
+
+    _reg("OpenWebText", """@article{gokaslan2019openwebtext,
+  title={OpenWebText Corpus},
+  author={Gokaslan, Aaron and Cohen, Vanya and Pavlick, Ellie and Tellex, Stefanie},
+  year={2019},
+  url={http://Skylion007.github.io/OpenWebTextCorpus}
+}""", url="http://Skylion007.github.io/OpenWebTextCorpus")
+
+    # ── Models ──
+    _reg("GPT-4", """@article{openai2023gpt4,
+  title={GPT-4 Technical Report},
+  author={OpenAI},
+  journal={arXiv:2303.08774},
+  year={2023}
+}""", aliases=["GPT-4o", "GPT-4V", "GPT-4 Turbo", "ChatGPT"])
+
+    _reg("GPT-3", """@inproceedings{brown2020gpt3,
+  title={Language Models are Few-Shot Learners},
+  author={Brown, Tom B and Mann, Benjamin and Ryder, Nick and Subbiah, Melanie and Kaplan, Jared and Dhariwal, Prafulla and Neelakantan, Arvind and Shyam, Pranav and Sastry, Girish and Askell, Amanda and others},
+  booktitle={NeurIPS},
+  year={2020}
+}""", aliases=["GPT-3.5", "GPT-3.5-Turbo"])
+
+    _reg("BERT", """@inproceedings{devlin2019bert,
+  title={BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding},
+  author={Devlin, Jacob and Chang, Ming-Wei and Lee, Kenton and Toutanova, Kristina},
+  booktitle={NAACL},
+  year={2019}
+}""", doi="10.18653/v1/N19-1423", aliases=["BERT-base", "BERT-large", "RoBERTa"])
+
+    _reg("LLaMA", """@article{touvron2023llama,
+  title={LLaMA: Open and Efficient Foundation Language Models},
+  author={Touvron, Hugo and Lavril, Thibaut and Izacard, Gautier and Martinet, Xavier and Lachaux, Marie-Anne and Lacroix, Timoth{\\'e}e and Rozi{\\`e}re, Baptiste and Goyal, Naman and Hambro, Eric and Azhar, Faisal and others},
+  journal={arXiv:2302.13971},
+  year={2023}
+}""", aliases=["LLaMA 2", "LLaMA 3", "Llama 2", "Llama 3", "LLaMA-7B", "LLaMA-13B", "LLaMA-70B"])
+
+    _reg("T5", """@article{raffel2020t5,
+  title={Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer},
+  author={Raffel, Colin and Shazeer, Noam and Roberts, Adam and Lee, Katherine and Narang, Sharan and Matena, Michael and Zhou, Yanqi and Li, Wei and Liu, Peter J},
+  journal={JMLR},
+  volume={21},
+  number={140},
+  year={2020}
+}""", aliases=["T5-small", "T5-base", "T5-large", "Flan-T5"])
+
+    _reg("BART", """@inproceedings{lewis2020bart,
+  title={BART: Denoising Sequence-to-Sequence Pre-training for Natural Language Generation, Translation, and Comprehension},
+  author={Lewis, Mike and Liu, Yinhan and Goyal, Naman and Ghazvininejad, Marjan and Mohamed, Abdelrahman and Levy, Omer and Stoyanov, Veselin and Zettlemoyer, Luke},
+  booktitle={ACL},
+  year={2020}
+}""", doi="10.18653/v1/2020.acl-main.703")
+
+    _reg("CLIP", """@inproceedings{radford2021clip,
+  title={Learning Transferable Visual Models From Natural Language Supervision},
+  author={Radford, Alec and Kim, Jong Wook and Hallacy, Chris and Ramesh, Aditya and Goh, Gabriel and Agarwal, Sandhini and Sastry, Girish and Askell, Amanda and Mishkin, Pamela and Clark, Jack and others},
+  booktitle={ICML},
+  year={2021}
+}""")
+
+    _reg("ViT", """@inproceedings{dosovitskiy2021vit,
+  title={An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale},
+  author={Dosovitskiy, Alexey and Beyer, Lucas and Kolesnikov, Alexander and Weissenborn, Dirk and Zhai, Xiaohua and Unterthiner, Thomas and Dehghani, Mostafa and Minderer, Matthias and Heigold, Georg and Gelly, Sylvain and others},
+  booktitle={ICLR},
+  year={2021}
+}""", aliases=["Vision Transformer", "ViT-B", "ViT-L", "ViT-H"])
+
+    _reg("ResNet", """@inproceedings{he2016resnet,
+  title={Deep Residual Learning for Image Recognition},
+  author={He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
+  booktitle={CVPR},
+  year={2016}
+}""", doi="10.1109/CVPR.2016.90", aliases=["ResNet-50", "ResNet-101", "ResNet-152", "ResNet-18", "ResNet-34"])
+
+    _reg("YOLO", """@inproceedings{redmon2016yolo,
+  title={You Only Look Once: Unified, Real-Time Object Detection},
+  author={Redmon, Joseph and Divvala, Santosh and Girshick, Ross and Farhadi, Ali},
+  booktitle={CVPR},
+  year={2016}
+}""", doi="10.1109/CVPR.2016.91", aliases=["YOLOv3", "YOLOv4", "YOLOv5", "YOLOv8"])
+
+    _reg("Sentence-BERT", """@inproceedings{reimers2019sbert,
+  title={Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks},
+  author={Reimers, Nils and Gurevych, Iryna},
+  booktitle={EMNLP-IJCNLP},
+  year={2019}
+}""", doi="10.18653/v1/D19-1410", aliases=["SBERT", "SentenceTransformer"])
+
+    _reg("Whisper", """@article{radford2022whisper,
+  title={Robust Speech Recognition via Large-Scale Weak Supervision},
+  author={Radford, Alec and Kim, Jong Wook and Xu, Tao and Brockman, Greg and McLeavey, Christine and Sutskever, Ilya},
+  journal={arXiv:2212.04356},
+  year={2022}
+}""")
+
+    _reg("Stable Diffusion", """@inproceedings{rombach2022sdxl,
+  title={High-Resolution Image Synthesis with Latent Diffusion Models},
+  author={Rombach, Robin and Blattmann, Andreas and Lorenz, Dominik and Esser, Patrick and Ommer, Bj{\\"o}rn},
+  booktitle={CVPR},
+  year={2022}
+}""", doi="10.1109/CVPR52688.2022.01042", aliases=["SDXL", "SD 1.5", "SD 2.1", "Latent Diffusion"])
+
+    _reg("DALL-E", """@article{ramesh2021dalle,
+  title={Zero-Shot Text-to-Image Generation},
+  author={Ramesh, Aditya and Pavlov, Mikhail and Goh, Gabriel and Gray, Scott and Voss, Chelsea and Radford, Alec and Chen, Mark and Sutskever, Ilya},
+  journal={arXiv:2102.12092},
+  year={2021}
+}""", aliases=["DALL-E 2", "DALL-E 3"])
+
+    # ── Benchmarks / Competitions ──
+    _reg("MTEB", """@inproceedings{muennighoff2023mteb,
+  title={MTEB: Massive Text Embedding Benchmark},
+  author={Muennighoff, Niklas and Tazi, Nouamane and Magne, Lo{\\"i}c and Reimers, Nils},
+  booktitle={EACL},
+  year={2023}
+}""", doi="10.18653/v1/2023.eacl-main.148")
+
+    _reg("LMSYS Chatbot Arena", """@article{chiang2024chatbotarena,
+  title={Chatbot Arena: An Open Platform for Evaluating LLMs by Human Preference},
+  author={Chiang, Wei-Lin and Zheng, Lianmin and Sheng, Ying and Angelopoulos, Anastasios Nikolas and Li, Tianle and Li, Dacheng and Zhang, Hao and Zhu, Banghua and Jordan, Michael and Gonzalez, Joseph E and Stoica, Ion},
+  journal={arXiv:2403.04132},
+  year={2024}
+}""", aliases=["Chatbot Arena"])
+
+    _reg("SWAG", """@inproceedings{zellers2018swag,
+  title={SWAG: A Large-Scale Adversarial Dataset for Grounded Commonsense Inference},
+  author={Zellers, Rowan and Bisk, Yonatan and Schwartz, Roy and Choi, Yejin},
+  booktitle={EMNLP},
+  year={2018}
+}""", doi="10.18653/v1/D18-1009")
+
+    _reg("TriviaQA", """@inproceedings{joshi2017triviaqa,
+  title={TriviaQA: A Large Scale Distantly Supervised Challenge Dataset for Reading Comprehension},
+  author={Joshi, Mandar and Choi, Eunsol and Weld, Daniel S and Zettlemoyer, Luke},
+  booktitle={ACL},
+  year={2017}
+}""", doi="10.18653/v1/P17-1147")
+
+    _reg("BoolQ", """@inproceedings{clark2019boolq,
+  title={BoolQ: Exploring the Surprising Difficulty of Natural Yes/No Questions},
+  author={Clark, Christopher and Lee, Kenton and Chang, Ming-Wei and Kwiatkowski, Tom and Collins, Michael and Toutanova, Kristina},
+  booktitle={NAACL},
+  year={2019}
+}""", doi="10.18653/v1/N19-1300")
+
+    _reg("GSM8K", """@inproceedings{cobbe2021gsm8k,
+  title={Training Verifiers to Solve Math Word Problems},
+  author={Cobbe, Karl and Kosaraju, Vineet and Bavarian, Mohammad and Chen, Mark and Jun, Heewoo and Kaiser, Lukasz and Plappert, Matthias and Tworek, Jerry and Hilton, Jacob and Nakano, Reiichiro and others},
+  journal={arXiv:2110.14168},
+  year={2021}
+}""")
+
+    _reg("MATH", """@article{hendrycks2021math,
+  title={Measuring Mathematical Problem Solving With the MATH Dataset},
+  author={Hendrycks, Dan and Burns, Collin and Kadavath, Saurav and Arora, Akul and Basart, Steven and Tang, Eric and Song, Dawn and Steinhardt, Jacob},
+  journal={arXiv:2103.03874},
+  year={2021}
+}""")
+
+    _reg("TruthfulQA", """@inproceedings{lin2022truthfulqa,
+  title={TruthfulQA: Measuring How Models Mimic Human Falsehoods},
+  author={Lin, Stephanie and Hilton, Jacob and Evans, Owain},
+  booktitle={ACL},
+  year={2022}
+}""", doi="10.18653/v1/2022.acl-long.229")
+
+    _reg("AlpacaEval", """@article{dubois2024alpacaeval,
+  title={AlpacaEval: An Automatic Evaluator of Instruction-following Models},
+  author={Dubois, Yann and Galambos, Bal{\\'a}zs and Liang, Percy and Hashimoto, Tatsunori B},
+  journal={arXiv:2405.16495},
+  year={2024}
+}""", aliases=["AlpacaEval 2.0"])
+
+    return _ENTITY_CITATIONS
+
+
+def lookup_entity_citation(name: str) -> dict | None:
+    """Look up the canonical citation for a dataset/model/benchmark by name.
+
+    Returns a dict with bibtex, doi, url, aliases, or None if not found.
+    Case-insensitive, alias-aware.
+    """
+    entities = _build_entity_citations()
+    key = name.strip().lower()
+    if key in entities:
+        return dict(entities[key])
+    return None
+
+
+def annotate_entities_with_citations(paper_text: str) -> dict:
+    """Scan paper text for known datasets/models/benchmarks and attach citations.
+
+    Returns a dict with:
+      - entities_found: list of {name, canonical_name, bibtex, doi, category}
+      - annotated_text: same text with [?] markers on unmatched entities
+      - coverage: fraction of detected entities that have citations
+    """
+    entities = _build_entity_citations()
+    found = []
+    seen = set()
+    text_lower = paper_text.lower()
+
+    # Match longer names first and deduplicate by canonical entity. This avoids
+    # false positives such as "math" inside "mathematical" or "VOC" inside
+    # "vocabulary", and prevents SuperGLUE from also counting as GLUE.
+    for name in sorted(entities, key=len, reverse=True):
+        entry = entities[name]
+        canonical = entry.get("canonical_name", name)
+        if canonical in seen:
+            continue
+        if _entity_pattern(name).search(text_lower):
+            seen.add(canonical)
+            found.append({
+                "name": name,
+                "canonical_name": canonical,
+                "bibtex": entry["bibtex"],
+                "doi": entry.get("doi", ""),
+                "url": entry.get("url", ""),
+                "match_type": "exact" if name == canonical else "alias",
+            })
+
+    # Categorize
+    dataset_keywords = {"dataset", "corpus", "benchmark", "data", "set", "challenge"}
+    model_keywords = {"model", "net", "transformer", "bert", "gpt", "llama", "llm", "vit", "clip"}
+    for f in found:
+        name_lower = f["name"].lower()
+        if any(kw in name_lower for kw in dataset_keywords) or f["canonical_name"] in {
+            "imagenet", "cifar-10", "cifar-100", "mnist", "coco", "pascal voc", "cityscapes",
+            "squad", "glue", "superglue", "mmlu", "humaneval", "wmt", "librispeech",
+            "commonvoice", "xnli", "big-bench", "hellaswag", "mimic-iii", "chexpert",
+            "kitti", "nuscenes", "waymo", "common crawl", "the pile", "openwebtext",
+            "mteb", "swag", "triviaqa", "boolq", "gsm8k", "math", "truthfulqa", "alpacaeval",
+        }:
+            f["category"] = "dataset"
+        elif any(kw in name_lower for kw in model_keywords) or f["canonical_name"] in {
+            "gpt-4", "gpt-3", "bert", "llama", "t5", "bart", "clip", "vit", "resnet",
+            "yolo", "sentence-bert", "whisper", "stable diffusion", "dall-e",
+        }:
+            f["category"] = "model"
+        elif f["canonical_name"] in {"lmsys chatbot arena", "stack overflow", "wikipedia"}:
+            f["category"] = "benchmark"
+        else:
+            f["category"] = "other"
+
+    citation_count = sum(1 for f in found if f.get("bibtex"))
+    coverage = citation_count / len(found) if found else 0.0
+    return {
+        "entities_found": found,
+        "entity_count": len(found),
+        "citation_count": citation_count,
+        "coverage": coverage,
+        "bibtex_entries": list({f["bibtex"] for f in found}),
+    }
+
+
+def build_entity_bibliography(paper_text: str, *, style: str = "gbt7714") -> str:
+    """Generate a BibTeX block for all datasets/models/benchmarks mentioned.
+
+    Useful for appending to a paper's reference section.
+    """
+    result = annotate_entities_with_citations(paper_text)
+    if not result["entities_found"]:
+        return "% No known datasets/models found in text"
+    lines = ["% ── Dataset & Model Citations (auto-generated) ──", ""]
+    seen = set()
+    for f in result["entities_found"]:
+        if f["bibtex"] not in seen:
+            seen.add(f["bibtex"])
+            lines.append(f["bibtex"])
+            lines.append("")
+    return "\n".join(lines)

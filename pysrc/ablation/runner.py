@@ -13,10 +13,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Ensure pysrc/ is on sys.path so imports work from any working directory
+_SELF_DIR = Path(__file__).resolve().parent
+_PYSRC_DIR = _SELF_DIR.parent
+if str(_PYSRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_PYSRC_DIR))
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +193,25 @@ class AblationRunner:
     def __init__(self, config: dict = None):
         self._config = config or {}
         self._results: List[ExperimentMetrics] = []
+        self._embedder = None  # Lazy-loaded shared embedder
+
+    def _get_embedder(self):
+        """Get or create a shared EmbeddingProvider. Model is loaded once."""
+        if self._embedder is None:
+            from rag_ingest import EmbeddingProvider
+            self._embedder = EmbeddingProvider(self._config)
+            # Pre-load the local model in a thread-pooled event loop
+            import asyncio
+            import concurrent.futures
+
+            async def _load():
+                await self._embedder._ensure_local_model()
+
+            with concurrent.futures.ThreadPoolExecutor() as ex:
+                future = ex.submit(asyncio.run, _load())
+                future.result(timeout=120)
+            logger.info("Shared embedding model loaded")
+        return self._embedder
 
     def run_all(self, experiments: List[AblationConfig] = None,
                 queries: List[str] = None,
@@ -271,7 +297,21 @@ class AblationRunner:
         from rag_retrieval import classify_query, SearchStrategy
 
         component = exp.component
-        embedder = EmbeddingProvider(self._config)
+        embedder = self._get_embedder()
+
+        # Pre-embed all queries in one batch for efficiency
+        import concurrent.futures
+        try:
+
+            async def _embed_batch():
+                return await embedder.embed(queries, self._config)
+
+            with concurrent.futures.ThreadPoolExecutor() as ex:
+                future = ex.submit(asyncio.run, _embed_batch())
+                all_embeddings = future.result(timeout=120)
+        except Exception as e:
+            logger.warning(f"Embedding failed: {e}, using zeros")
+            all_embeddings = np.zeros((len(queries), embedder.dim), dtype=np.float32)
 
         total_precision = 0.0
         total_recall = 0.0
@@ -288,7 +328,7 @@ class AblationRunner:
         total_retries = 0
         n = len(queries)
 
-        for query in queries:
+        for i, query in enumerate(queries):
             q_t0 = time.monotonic()
 
             # Step 1: Classify query type
@@ -296,18 +336,8 @@ class AblationRunner:
             if "neo4j" in component and strategy == SearchStrategy.GLOBAL:
                 strategy = SearchStrategy.LOCAL
 
-            # Step 2: Embed query (handle async)
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as ex:
-                        future = ex.submit(asyncio.run, embedder.embed_single(query, self._config))
-                        query_emb = future.result(timeout=10)
-                else:
-                    query_emb = asyncio.run(embedder.embed_single(query, self._config))
-            except Exception:
-                query_emb = [0.0] * embedder.dim
+            # Step 2: Get pre-computed embedding
+            query_emb = all_embeddings[i].tolist() if i < len(all_embeddings) else [0.0] * embedder.dim
 
             # Step 3: Attempt retrieval (measure what we can without full DB)
             try:
@@ -392,70 +422,213 @@ class AblationRunner:
 
     def _attempt_retrieval(self, query: str, query_emb: List[float],
                            strategy: str, component: str) -> Optional[dict]:
-        """Attempt to retrieve chunks for a query. Returns None if services unavailable."""
-        try:
-            from rag_ingest import EmbeddingProvider
-            from rag_retrieval import classify_query, SearchStrategy
+        """Attempt real retrieval: PG vector + Neo4j graph + Redis cache.
 
-            # Try to connect to PostgreSQL for real retrieval
-            pg_cfg = self._config.get("postgres") or self._config.get("postgresql") or {}
-            if pg_cfg:
-                import asyncpg
-                import asyncio
+        Returns a dict with chunks, entities, communities, and from_cache flag.
+        Falls back to None on any connection failure.
+        """
+        import asyncio
+        import asyncpg
+        import concurrent.futures
 
-                async def _fetch():
-                    conn = await asyncpg.connect(
-                        host=pg_cfg.get("host", "localhost"),
-                        port=pg_cfg.get("port", 5432),
-                        user=pg_cfg.get("user", "root"),
-                        password=pg_cfg.get("password", "root"),
-                        database=pg_cfg.get("database", "root"),
-                        timeout=3,
+        pg_cfg = self._config.get("postgres") or self._config.get("postgresql") or {}
+        if not pg_cfg:
+            return None
+
+        async def _fetch_all():
+            chunks = []
+            entities = []
+            communities = []
+            from_cache = False
+
+            # ── Redis semantic cache check ──
+            if "redis_cache" not in component:
+                try:
+                    import redis.asyncio as aioredis
+                    redis_cfg = self._config.get("redis", {})
+                    r = aioredis.Redis(
+                        host=redis_cfg.get("host", "localhost"),
+                        port=redis_cfg.get("port", 6379),
+                        password=redis_cfg.get("password", "root"),
+                        socket_connect_timeout=2,
                     )
+                    import hashlib
+                    cache_key = f"rag:cache:{hashlib.sha256(query.encode()).hexdigest()[:16]}"
+                    cached = await r.get(cache_key)
+                    if cached:
+                        data = json.loads(cached)
+                        chunks = [{"doc_id": c.get("doc_id", ""), "text": c.get("text", ""),
+                                   "score": c.get("score", 0.0), "source": "cache"}
+                                  for c in data.get("chunks", [])]
+                        entities = data.get("entities", [])
+                        communities = data.get("communities", [])
+                        from_cache = True
+                    await r.aclose()
+                except Exception:
+                    pass
+
+            if from_cache:
+                return {"chunks": chunks, "entities": entities, "communities": communities,
+                        "strategy": strategy, "from_cache": True}
+
+            # ── PostgreSQL vector search ──
+            pg_conn = await asyncpg.connect(
+                host=pg_cfg.get("host", "localhost"),
+                port=pg_cfg.get("port", 54320),
+                user=pg_cfg.get("user", "root"),
+                password=pg_cfg.get("password", "root"),
+                database=pg_cfg.get("database", "root"),
+                timeout=5,
+            )
+            try:
+                rows = await pg_conn.fetch(
+                    """SELECT id, doc_id, text, metadata,
+                              1.0 - (embedding <=> $1::vector) AS score
+                       FROM rag_chunks
+                       ORDER BY embedding <=> $1::vector
+                       LIMIT 10""",
+                    json.dumps(query_emb),
+                )
+                chunks = [
+                    {"doc_id": r["doc_id"], "text": r["text"],
+                     "score": round(r["score"], 4), "source": "vector"}
+                    for r in rows
+                ]
+
+                # ── Full-text search (if not ablated) ──
+                if "fulltext" not in component and rows:
                     try:
-                        rows = await conn.fetch(
-                            """SELECT id, doc_id, text, metadata,
-                                      1.0 - (embedding <=> $1::vector) AS score
+                        # Simple tsvector search on chunk text
+                        ft_rows = await pg_conn.fetch(
+                            """SELECT id, doc_id, text,
+                                      ts_rank(to_tsvector('english', text), plainto_tsquery('english', $1)) AS score
                                FROM rag_chunks
-                               ORDER BY embedding <=> $1::vector
-                               LIMIT 10""",
-                            json.dumps(query_emb),
+                               WHERE to_tsvector('english', text) @@ plainto_tsquery('english', $1)
+                               ORDER BY score DESC
+                               LIMIT 5""",
+                            query,
                         )
-                        return [dict(r) for r in rows]
-                    finally:
-                        await conn.close()
+                        ft_chunks = [
+                            {"doc_id": r["doc_id"], "text": r["text"],
+                             "score": round(r["score"], 4), "source": "fulltext"}
+                            for r in ft_rows
+                        ]
+                        # Merge: vector chunks first, then fulltext not already in vector results
+                        existing_ids = {c["doc_id"] for c in chunks}
+                        for fc in ft_chunks:
+                            if fc["doc_id"] not in existing_ids:
+                                chunks.append(fc)
+                    except Exception:
+                        pass  # tsvector may not be set up
+            finally:
+                await pg_conn.close()
 
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as ex:
-                        future = ex.submit(asyncio.run, _fetch())
-                        chunks = future.result(timeout=10)
-                else:
-                    chunks = asyncio.run(_fetch())
+            # ── Neo4j graph retrieval ──
+            if "neo4j" not in component:
+                try:
+                    neo4j_cfg = self._config.get("neo4j", {})
+                    from neo4j import GraphDatabase
+                    uri = neo4j_cfg.get("uri", "bolt://localhost:7807")
+                    user = neo4j_cfg.get("user", "neo4j")
+                    password = neo4j_cfg.get("password", "root")
 
-                return {
-                    "chunks": [
-                        {"doc_id": c["doc_id"], "text": c["text"],
-                         "score": c["score"], "source": "vector"}
-                        for c in chunks
-                    ],
-                    "entities": [],
-                    "communities": [],
-                    "strategy": strategy,
-                    "from_cache": False,
-                }
-        except Exception:
-            pass
+                    driver = GraphDatabase.driver(uri, auth=(user, password))
+                    with driver.session(database="neo4j") as session:
+                        # Search for entities matching query keywords
+                        keywords = [w for w in query.lower().split()
+                                    if len(w) > 2 and w not in ("the", "and", "for", "how", "does", "what", "that", "with", "from")]
+                        if keywords:
+                            # Build a simple keyword search in Cypher
+                            cypher_parts = " OR ".join(
+                                [f"e.name CONTAINS '{kw}'" for kw in keywords[:5]]
+                            )
+                            result = session.run(
+                                f"MATCH (e:rag_entity) WHERE {cypher_parts} "
+                                "OPTIONAL MATCH (e)-[r]-(other) "
+                                "RETURN e.name AS name, e.type AS type, "
+                                "collect(DISTINCT type(r)) AS relations, "
+                                "collect(DISTINCT labels(other)) AS neighbor_types "
+                                "LIMIT 20"
+                            )
+                            for record in result:
+                                entities.append({
+                                    "name": record["name"],
+                                    "entity_type": record.get("type", "UNKNOWN"),
+                                    "relationships": [
+                                        {"relation_type": rel, "neighbor_type": nbr}
+                                        for rel, nbr in zip(record.get("relations", []),
+                                                           record.get("neighbor_types", []))
+                                    ],
+                                })
+                    driver.close()
+                except Exception:
+                    pass  # Neo4j unavailable — graph entities stay empty
 
-        return None
+            return {
+                "chunks": chunks,
+                "entities": entities,
+                "communities": communities,
+                "strategy": strategy,
+                "from_cache": False,
+            }
+
+        try:
+            # Always use a fresh event loop in a thread pool to avoid nesting issues
+            with concurrent.futures.ThreadPoolExecutor() as ex:
+                future = ex.submit(asyncio.run, _fetch_all())
+                return future.result(timeout=30)
+        except Exception as e:
+            logger.debug(f"Retrieval failed: {e}")
+            return None
 
     def _is_relevant(self, text: str, query: str) -> bool:
-        """Check if retrieved text is relevant to the query."""
-        query_terms = set(query.lower().split())
-        text_terms = set(text.lower().split())
-        overlap = len(query_terms & text_terms)
-        return overlap >= 2
+        """Check if retrieved text is relevant to the query.
+
+        Uses token overlap with weighting: query terms that appear in text.
+        More than simple set overlap — requires at least 2 meaningful terms
+        or a high ratio of query coverage.
+        """
+        if not text or not query:
+            return False
+
+        query_lower = query.lower()
+        text_lower = text.lower()
+
+        # Extract meaningful query terms (filter stopwords and short words)
+        stopwords = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will",
+            "would", "could", "should", "may", "might", "can", "shall",
+            "to", "of", "in", "for", "on", "with", "at", "by", "from",
+            "as", "into", "through", "during", "before", "after", "above",
+            "below", "between", "under", "and", "but", "or", "nor", "not",
+            "so", "yet", "both", "either", "neither", "each", "every",
+            "all", "any", "few", "more", "most", "other", "some", "such",
+            "no", "only", "own", "same", "than", "too", "very", "just",
+            "it", "its", "that", "this", "these", "those", "which", "who",
+            "whom", "whose", "what", "when", "where", "why", "how",
+            "about", "also", "if", "then", "else", "here", "there",
+        }
+        query_terms = [w for w in query_lower.split()
+                       if len(w) > 1 and w not in stopwords]
+        text_terms = set(text_lower.split())
+
+        # Count how many query terms appear in the text
+        matches = sum(1 for qt in query_terms if qt in text_terms)
+
+        # Also check for key phrases (2-3 word sequences from query)
+        phrase_matches = 0
+        if len(query_terms) >= 2:
+            for i in range(len(query_terms) - 1):
+                bigram = f"{query_terms[i]} {query_terms[i+1]}"
+                if bigram in text_lower:
+                    phrase_matches += 2  # Weight phrase matches higher
+
+        total_score = matches + phrase_matches
+
+        # Require at least 2 matches, or coverage of >30% of query terms
+        coverage = total_score / max(1, len(query_terms))
+        return total_score >= 2 or coverage >= 0.3
 
     def _compute_mrr(self, chunks: List[dict], query: str) -> float:
         """Compute Mean Reciprocal Rank."""
@@ -593,15 +766,43 @@ if __name__ == "__main__":
                    help="Iterations per experiment")
     p.add_argument("--experiment", "-e", choices=[e.name for e in STANDARD_ABLATIONS],
                    help="Run a single experiment (default: all)")
+    p.add_argument("--config", "-c", default=None,
+                   help="Path to config TOML (default: auto-detect model.toml)")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    # ── Load config ──
+    config = {}
+    config_path = args.config
+    if config_path is None:
+        # Auto-detect model.toml
+        candidates = [
+            _PYSRC_DIR / "model.toml",
+            Path.cwd() / "model.toml",
+            Path.cwd() / "pysrc" / "model.toml",
+        ]
+        for c in candidates:
+            if c.exists():
+                config_path = str(c)
+                break
+
+    if config_path and os.path.exists(config_path):
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        with open(config_path, "rb") as f:
+            config = tomllib.load(f)
+        logger.info(f"Loaded config from {config_path}")
+    else:
+        logger.warning("No config found — will use simulation fallback")
 
     experiments = STANDARD_ABLATIONS
     if args.experiment:
         experiments = [e for e in STANDARD_ABLATIONS if e.name == args.experiment]
 
-    runner = AblationRunner()
+    runner = AblationRunner(config)
     results = runner.run_all(experiments=experiments, iterations=args.iterations)
     runner.export_results(args.output)
 

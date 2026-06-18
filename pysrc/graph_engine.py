@@ -107,7 +107,7 @@ class GraphEngine:
                           "Skill", "Decision", "Owner", "Memory", "Evidence",
                           "Claim", "Artifact", "Entity", "Alternative",
                           "LiteratureReview", "Project", "Session", "Scope",
-                          "HyperEdge", "Tool", "ConversationSession", "MemoryRecord",
+                          "HyperEdge", "Tool", "Option",
                           "RAGEntity", "Document", "Community", "MemoryCard"]:
                 try:
                     await session.run(
@@ -141,7 +141,7 @@ class GraphEngine:
             "project": "Project", "session": "Session",
             "scope": "Scope", "hyperedge": "HyperEdge",
             "document": "Document", "community": "Community",
-            "memory_card": "MemoryCard",
+            "memory_card": "MemoryCard", "option": "Option",
         }
         neo_label = label_map.get(kind, "OntologyNode")
 

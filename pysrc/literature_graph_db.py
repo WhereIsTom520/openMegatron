@@ -2,7 +2,10 @@
 
 import json
 import sqlite3
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # ── SQL constants ────────────────────────────────────────────────────────────
 
@@ -69,11 +72,17 @@ SQL_COUNT_CITATIONS = "SELECT COUNT(*) FROM citations"
 
 
 class LiteratureGraphDB:
-    """SQLite-backed persistence layer for the literature knowledge graph."""
+    """SQLite-backed persistence layer for the literature knowledge graph.
 
-    def __init__(self, db_path: str = ":memory:"):
+    When an ontology_service is provided, papers, authors, venues and
+    citations are also synced to the ontology graph (PostgreSQL + Neo4j)
+    for cross-domain queries.  SQLite remains the authoritative store.
+    """
+
+    def __init__(self, db_path: str = ":memory:", ontology_service=None):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._ontology = ontology_service  # MemoryService instance (optional)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -101,6 +110,73 @@ class LiteratureGraphDB:
             ),
         )
         self._conn.commit()
+        self._sync_paper_to_ontology(paper)
+
+    def _sync_paper_to_ontology(self, paper: dict) -> None:
+        """Mirror a paper to the ontology graph (fire-and-forget)."""
+        svc = self._ontology
+        if svc is None:
+            return
+        try:
+            import asyncio
+            paper_id = paper["id"]
+            title = paper.get("title", "")[:500]
+            authors = paper.get("authors", [])
+            year = paper.get("year")
+            venue_name = paper.get("venue", "").strip()
+            abstract = (paper.get("abstract") or "")[:2000]
+            keywords = paper.get("keywords", [])
+
+            async def _sync():
+                pg = getattr(svc, 'pg_pool', None)
+                if pg is None:
+                    return
+                async with pg.acquire() as conn:
+                    # Paper node
+                    p_id = svc.ontology_node_id("paper", paper_id)
+                    await svc._upsert_ontology_node(conn, p_id, "paper", title, {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "year": year,
+                        "venue": venue_name,
+                        "abstract": abstract,
+                        "keywords": keywords if isinstance(keywords, list) else [],
+                    })
+                    # Venue node
+                    if venue_name:
+                        v_id = svc.ontology_node_id("venue", venue_name)
+                        await svc._upsert_ontology_node(conn, v_id, "venue", venue_name, {
+                            "paper_id": paper_id,
+                        })
+                        await svc._upsert_link(conn, p_id, v_id, "published_in", 1.0,
+                            {"paper_id": paper_id, "venue": venue_name})
+                    # Author nodes + authored_by relations
+                    if isinstance(authors, list):
+                        for author in authors:
+                            if isinstance(author, dict):
+                                author_name = author.get("name", "") or str(author)
+                                author_id = author.get("id") or author_name
+                            elif isinstance(author, str):
+                                author_name = author
+                                author_id = author_name
+                            else:
+                                continue
+                            a_id = svc.ontology_node_id("author", author_id)
+                            await svc._upsert_ontology_node(conn, a_id, "author", author_name[:200], {
+                                "author_id": author_id,
+                            })
+                            await svc._upsert_link(conn, p_id, a_id, "authored_by", 1.0,
+                                {"paper_id": paper_id, "author": author_name[:200]})
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(_sync())
+                else:
+                    loop.run_until_complete(_sync())
+            except RuntimeError:
+                asyncio.run(_sync())
+        except Exception:
+            logger.debug("Ontology sync for paper %s skipped", paper.get("id"), exc_info=True)
 
     def get_paper(self, paper_id: str) -> Optional[dict]:
         """Retrieve a paper by ID."""
@@ -133,6 +209,34 @@ class LiteratureGraphDB:
             ),
         )
         self._conn.commit()
+        self._sync_author_to_ontology(author)
+
+    def _sync_author_to_ontology(self, author: dict) -> None:
+        svc = self._ontology
+        if svc is None:
+            return
+        try:
+            import asyncio
+            async def _sync():
+                pg = getattr(svc, 'pg_pool', None)
+                if pg is None:
+                    return
+                async with pg.acquire() as conn:
+                    a_id = svc.ontology_node_id("author", author["id"])
+                    await svc._upsert_ontology_node(conn, a_id, "author", author["name"][:200], {
+                        "author_id": author["id"],
+                        "affiliation": author.get("affiliation", ""),
+                    })
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(_sync())
+                else:
+                    loop.run_until_complete(_sync())
+            except RuntimeError:
+                asyncio.run(_sync())
+        except Exception:
+            logger.debug("Ontology sync for author %s skipped", author.get("id"), exc_info=True)
 
     def get_author(self, author_id: str) -> Optional[dict]:
         """Retrieve an author by ID."""
@@ -157,6 +261,33 @@ class LiteratureGraphDB:
         """Add a citation edge."""
         self._conn.execute(SQL_INSERT_CITATION, (source_id, target_id, context))
         self._conn.commit()
+        self._sync_citation_to_ontology(source_id, target_id, context)
+
+    def _sync_citation_to_ontology(self, source_id: str, target_id: str, context: Optional[str]) -> None:
+        svc = self._ontology
+        if svc is None:
+            return
+        try:
+            import asyncio
+            async def _sync():
+                pg = getattr(svc, 'pg_pool', None)
+                if pg is None:
+                    return
+                async with pg.acquire() as conn:
+                    src_id = svc.ontology_node_id("paper", source_id)
+                    tgt_id = svc.ontology_node_id("paper", target_id)
+                    await svc._upsert_link(conn, src_id, tgt_id, "cites", 1.0,
+                        {"source_id": source_id, "target_id": target_id, "context": context or ""})
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(_sync())
+                else:
+                    loop.run_until_complete(_sync())
+            except RuntimeError:
+                asyncio.run(_sync())
+        except Exception:
+            logger.debug("Ontology sync for citation %s->%s skipped", source_id, target_id, exc_info=True)
 
     def get_citations_from(self, paper_id: str) -> list[dict]:
         """Get papers cited by this paper."""

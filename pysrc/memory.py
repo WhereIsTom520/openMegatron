@@ -252,29 +252,99 @@ class MemoryService:
                         """
                         WITH doomed AS (
                             SELECT id FROM episodic_memory WHERE session_id = $1 OR id LIKE $2
+                            UNION SELECT id FROM ontology_nodes
+                            WHERE properties->>'session_id' = $1
+                               OR label = $1
+                               OR label LIKE $3
+                            UNION SELECT node_id FROM memory_hyperedge_members
+                            WHERE hyperedge_id IN (
+                                SELECT id FROM memory_hyperedges WHERE metadata->>'session_id' = $1
+                            )
                         )
                         DELETE FROM memory_links
                         WHERE source_id IN (SELECT id FROM doomed) OR target_id IN (SELECT id FROM doomed)
                         """,
                         session_id,
-                        f"{session_id}_%"
+                        f"{session_id}_%",
+                        f"%{session_id}%",
                     )
                     await conn.execute(
                         """
                         WITH doomed AS (
                             SELECT id FROM episodic_memory WHERE session_id = $1 OR id LIKE $2
+                            UNION SELECT id FROM ontology_nodes
+                            WHERE properties->>'session_id' = $1
+                               OR label = $1
+                               OR label LIKE $3
+                            UNION SELECT node_id FROM memory_hyperedge_members
+                            WHERE hyperedge_id IN (
+                                SELECT id FROM memory_hyperedges WHERE metadata->>'session_id' = $1
+                            )
                         )
                         DELETE FROM memory_evolution_log
                         WHERE source_id IN (SELECT id FROM doomed) OR target_id IN (SELECT id FROM doomed)
                         """,
                         session_id,
-                        f"{session_id}_%"
+                        f"{session_id}_%",
+                        f"%{session_id}%",
+                    )
+                    await conn.execute(
+                        """
+                        DELETE FROM ontology_nodes
+                        WHERE id IN (
+                            SELECT node_id FROM memory_hyperedge_members
+                            WHERE hyperedge_id IN (
+                                SELECT id FROM memory_hyperedges WHERE metadata->>'session_id' = $1
+                            )
+                        )
+                           OR properties->>'session_id' = $1
+                           OR label = $1
+                           OR label LIKE $2
+                        """,
+                        session_id,
+                        f"%{session_id}%",
+                    )
+                    await conn.execute(
+                        """
+                        DELETE FROM memory_hyperedge_members
+                        WHERE hyperedge_id IN (
+                            SELECT id FROM memory_hyperedges WHERE metadata->>'session_id' = $1
+                        )
+                        OR node_id IN (
+                            SELECT id FROM ontology_nodes
+                            WHERE properties->>'session_id' = $1
+                               OR label = $1
+                               OR label LIKE $2
+                        )
+                        """,
+                        session_id,
+                        f"%{session_id}%",
+                    )
+                    await conn.execute(
+                        """
+                        DELETE FROM memory_hyperedges
+                        WHERE metadata->>'session_id' = $1
+                           OR NOT EXISTS (
+                               SELECT 1 FROM memory_hyperedge_members m
+                               WHERE m.hyperedge_id = memory_hyperedges.id
+                           )
+                        """,
+                        session_id,
                     )
                     await conn.execute("DELETE FROM topic_index WHERE session_id = $1", session_id)
                     await conn.execute("DELETE FROM episodic_memory WHERE session_id = $1 OR id LIKE $2", session_id, f"{session_id}_%")
             if self.neo4j_driver:
                 async with self.neo4j_driver.session() as session:
-                    await session.run("MATCH (n {session_id: $sid}) DETACH DELETE n", sid=session_id)
+                    await session.run(
+                        """
+                        MATCH (n)
+                        WHERE n.session_id = $sid
+                           OR n.id CONTAINS $sid
+                           OR n.label CONTAINS $sid
+                        DETACH DELETE n
+                        """,
+                        sid=session_id,
+                    )
         except Neo4jError as e:
             logger.error(f"Neo4j delete failed: {e}")
             await self._enqueue_reconciliation(session_id, "clean_neo4j")
@@ -792,7 +862,8 @@ class MemoryService:
             "INSERT INTO ontology_nodes (id, kind, label, properties, created_at, updated_at) VALUES ("
             + d + "1, " + d + "2, " + d + "3, " + d + "4::jsonb, NOW(), NOW())"
             + " ON CONFLICT (id) DO UPDATE SET"
-            + " kind = EXCLUDED.kind, label = EXCLUDED.label, properties = EXCLUDED.properties, updated_at = NOW()",
+            + " kind = EXCLUDED.kind, label = EXCLUDED.label,"
+            + " properties = ontology_nodes.properties || EXCLUDED.properties, updated_at = NOW()",
             node_id, kind, label[:500], _j.dumps(properties or {})
         )
         # Mirror to Neo4j for native graph traversals
@@ -1375,6 +1446,8 @@ class MemoryRecallEngine:
         llm_cfg = config["llm"].copy()
         self.model = llm_cfg.pop("model", "gpt-4o-mini")
         self.extra_params = llm_cfg.pop("extra_params", {})
+        if not str(llm_cfg.get("api_key") or "").strip():
+            llm_cfg["api_key"] = "missing-api-key"
         self.llm = AsyncOpenAI(**llm_cfg)
         embed_cfg = config.get("embedding", {})
         rerank_cfg = config.get("rerank", {})

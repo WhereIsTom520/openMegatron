@@ -204,7 +204,7 @@ class CommunityDetector:
         with self._driver.session(database="neo4j") as session:
             # Simple approach: find connected components in the entity graph
             result = session.run(
-                """MATCH (e1:OntologyNode {kind: 'rag_entity'})-[r:RELATES_TO|DEPENDS_ON|PART_OF|CITES|CONTRASTS]-(e2:OntologyNode {kind: 'rag_entity'})
+                """MATCH (e1:OntologyNode {kind: 'rag_entity'})-[r]-(e2:OntologyNode {kind: 'rag_entity'})
                    RETURN e1.label AS entity1, e2.label AS entity2, type(r) AS rel_type
                    LIMIT 5000"""
             )

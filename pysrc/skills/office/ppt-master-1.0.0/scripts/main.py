@@ -71,12 +71,17 @@ LAYOUTS = {
     "content_bullets": "Title + bullet points",
     "content_body": "Title + freeform body text",
     "two_column": "Title + 2-column layout (text | text)",
+    "three_column": "Title + 3-column comparison layout (NEW)",
     "image_right": "Title + bullets left, image right",
     "image_left": "Title + image left, bullets right",
     "image_full": "Full-bleed image with overlay title",
     "table": "Title + data table",
     "chart": "Title + chart (bar/line/pie)",
     "chart_with_text": "Title + chart left, insights right",
+    "code_block": "Title + code block with syntax coloring (NEW)",
+    "flowchart": "Title + vertical/horizontal flow chart (NEW)",
+    "grid_2x2": "Title + 2x2 card grid with icons (NEW)",
+    "comparison_plus": "Title + feature matrix with check/x marks (NEW)",
     "quote": "Large quote + attribution",
     "comparison": "Title + 2-column comparison (A vs B)",
     "timeline": "Title + horizontal timeline",
@@ -911,6 +916,22 @@ def _build_content_slide(prs: Presentation, item: dict, index: int,
                          _make_font(28, theme["dark"], bold=True, name=theme.get("font_title")),
                          theme)
             _add_table(table_slide, table_data, 0.8, 1.5, 11.5, 5.2, theme)
+    # ── NEW ENHANCED LAYOUTS ──
+    elif layout == "code_block" or layout == "code":
+        from enhanced_layouts import build_code_block
+        build_code_block(prs, item, index, theme)
+    elif layout == "flowchart" or layout == "flow":
+        from enhanced_layouts import build_flowchart
+        build_flowchart(prs, item, index, theme)
+    elif layout == "three_column":
+        from enhanced_layouts import build_three_column
+        build_three_column(prs, item, index, theme)
+    elif layout == "grid_2x2" or layout == "grid":
+        from enhanced_layouts import build_grid_2x2
+        build_grid_2x2(prs, item, index, theme, image_placeholders)
+    elif layout == "comparison_plus":
+        from enhanced_layouts import build_comparison_plus
+        build_comparison_plus(prs, item, index, theme)
     else:
         # Default: bullets layout
         _build_content_bullets(prs, item, index, theme, image_placeholders)
@@ -980,22 +1001,43 @@ def _fallback_slides(topic: str, audience: str, language: str, slide_count: int)
         templates = [
             {"title": "核心结论", "bullets": [f"{topic} 的关键价值与适用边界", "用一句话说明问题、方案和预期收益", f"面向 {target} 保持表达清晰可执行"]},
             {"title": "背景与痛点", "bullets": ["现有流程中的低效、重复和信息断层", "用户真正需要的是更快生成、可持续编辑和可复用模板", "明确成功标准和约束条件"]},
-            {"title": "方案架构", "layout": "two_column",
-             "left": ["输入：主题、资料、风格、页数与受众", "处理：大纲生成、版式规划、内容填充", "输出：原生可编辑 PPTX 文件"],
-             "right": ["文本排版、表格渲染、图表生成", "智能配色、布局自适应", "支持 PDF/DOCX 源文件转换"]},
+            {"title": "方案架构", "layout": "flowchart",
+             "steps": [
+                 {"title": "输入", "description": "主题、资料、风格、受众、页数"},
+                 {"title": "处理", "description": "大纲生成、版式规划、内容填充"},
+                 {"title": "渲染", "description": "文本排版、表格、图表、智能配色"},
+                 {"title": "输出", "description": "原生可编辑 PPTX 文件"},
+             ]},
+            {"title": "功能亮点", "layout": "grid_2x2",
+             "cards": [
+                 {"title": "多风格主题", "description": "6种专业配色，品牌定制，深色/浅色模式", "icon": "🎨"},
+                 {"title": "16种版式", "description": "流程图、代码块、三栏、卡片网格等", "icon": "📐"},
+                 {"title": "100%可编辑", "description": "原生 PPTX 格式，所有元素可修改", "icon": "✏️"},
+                 {"title": "智能图表", "description": "自动生成柱状图、折线图、饼图", "icon": "📊"},
+             ]},
             {"title": "关键指标", "layout": "kpi_dashboard",
              "kpis": [
                  {"value": "6", "label": "主题风格", "change": "+2"},
-                 {"value": "16", "label": "版式布局", "change": "+10"},
+                 {"value": "21", "label": "版式布局", "change": "+5"},
                  {"value": "100%", "label": "可编辑性", "change": "+100%"},
                  {"value": "<3s", "label": "平均生成时间", "change": "-80%"},
              ]},
-            {"title": "落地流程", "layout": "timeline",
-             "milestones": [
-                 {"date": "Day 1", "label": "收集资料并生成初稿"},
-                 {"date": "Day 2", "label": "人工校对事实与叙事节奏"},
-                 {"date": "Day 3", "label": "统一视觉主题"},
-                 {"date": "Day 4", "label": "导出交付"},
+            {"title": "新旧对比", "layout": "comparison_plus",
+             "left_title": "传统 PPT 制作", "right_title": "AI PPT Master",
+             "features": [
+                 {"name": "内容生成", "left": "✗", "right": "✓"},
+                 {"name": "版式排版", "left": "✗", "right": "✓"},
+                 {"name": "配色方案", "left": "✗", "right": "✓"},
+                 {"name": "多源转换", "left": "✗", "right": "✓"},
+                 {"name": "品牌定制", "left": "✗", "right": "✓"},
+             ]},
+            {"title": "落地流程", "layout": "flowchart",
+             "direction": "horizontal",
+             "steps": [
+                 {"title": "Day 1", "description": "收集资料生成初稿"},
+                 {"title": "Day 2", "description": "人工校对事实与叙事"},
+                 {"title": "Day 3", "description": "统一视觉主题"},
+                 {"title": "Day 4", "description": "导出交付"},
              ]},
             {"title": "下一步", "bullets": ["补充真实数据和品牌模板", "接入图表、图片和引用来源", "沉淀为可复用的演示文稿工作流"]},
         ]
@@ -1003,22 +1045,43 @@ def _fallback_slides(topic: str, audience: str, language: str, slide_count: int)
         templates = [
             {"title": "Executive Summary", "bullets": [f"Key value and boundaries for {topic}", "State the problem, solution, and expected outcome", f"Keep the deck actionable for {target}"]},
             {"title": "Context and Pain Points", "bullets": ["Current workflows are slow, repetitive, or hard to reuse", "Users need editable outputs, not static screenshots", "Define success criteria and constraints early"]},
-            {"title": "Solution Architecture", "layout": "two_column",
-             "left": ["Input: topic, source material, style, audience", "Process: outline, layout, content, placement", "Output: native editable PPTX"],
-             "right": ["Text formatting, table rendering, charts", "Smart color palettes, auto-layout", "Source conversion from PDF/DOCX"]},
+            {"title": "Solution Architecture", "layout": "flowchart",
+             "steps": [
+                 {"title": "Input", "description": "Topic, source material, style, audience"},
+                 {"title": "Process", "description": "Outline generation, layout planning, content filling"},
+                 {"title": "Render", "description": "Text, tables, charts, smart color palettes"},
+                 {"title": "Output", "description": "Native editable PPTX file"},
+             ]},
+            {"title": "Feature Highlights", "layout": "grid_2x2",
+             "cards": [
+                 {"title": "6 Theme Styles", "description": "Professional, academic, creative, minimal, dark, corporate", "icon": "🎨"},
+                 {"title": "21 Layout Types", "description": "Flowchart, code block, 3-column, card grid, comparison matrix", "icon": "📐"},
+                 {"title": "100% Editable", "description": "Native PPTX format, all elements can be modified", "icon": "✏️"},
+                 {"title": "Smart Charts", "description": "Auto-generate bar, line, pie, doughnut charts", "icon": "📊"},
+             ]},
             {"title": "Key Metrics", "layout": "kpi_dashboard",
              "kpis": [
                  {"value": "6", "label": "Theme Styles", "change": "+2"},
-                 {"value": "16", "label": "Layout Types", "change": "+10"},
+                 {"value": "21", "label": "Layout Types", "change": "+5"},
                  {"value": "100%", "label": "Editable", "change": "+100%"},
                  {"value": "<3s", "label": "Avg Generation", "change": "-80%"},
              ]},
-            {"title": "Workflow", "layout": "timeline",
-             "milestones": [
-                 {"date": "Day 1", "label": "Gather materials, generate draft"},
-                 {"date": "Day 2", "label": "Review facts and narrative"},
-                 {"date": "Day 3", "label": "Apply visual theme"},
-                 {"date": "Day 4", "label": "Export and deliver"},
+            {"title": "Comparison", "layout": "comparison_plus",
+             "left_title": "Traditional PPT", "right_title": "AI PPT Master",
+             "features": [
+                 {"name": "Content Generation", "left": "✗", "right": "✓"},
+                 {"name": "Auto Layout", "left": "✗", "right": "✓"},
+                 {"name": "Color Theme", "left": "✗", "right": "✓"},
+                 {"name": "Multi-Source", "left": "✗", "right": "✓"},
+                 {"name": "Brand Customization", "left": "✗", "right": "✓"},
+             ]},
+            {"title": "Workflow", "layout": "flowchart",
+             "direction": "horizontal",
+             "steps": [
+                 {"title": "Day 1", "description": "Gather materials & draft"},
+                 {"title": "Day 2", "description": "Review facts & narrative"},
+                 {"title": "Day 3", "description": "Apply visual theme"},
+                 {"title": "Day 4", "description": "Export & deliver"},
              ]},
             {"title": "Next Steps", "bullets": ["Add real data and brand templates", "Connect charts, images, and citations", "Turn into reusable presentation workflow"]},
         ]
@@ -1083,6 +1146,13 @@ def build_presentation(args: dict, engine: str = "builtin") -> dict:
     prs.slide_width = SLIDE_W
     prs.slide_height = SLIDE_H
 
+    # Load template if specified
+    template_path = args.get("template") or args.get("template_path")
+    if template_path:
+        template_info = _load_template(prs, template_path, theme, args)
+    else:
+        template_info = None
+
     image_placeholders = bool(args.get("image_placeholders", True))
 
     # Apply brand logo to slide master
@@ -1131,6 +1201,8 @@ def build_presentation(args: dict, engine: str = "builtin") -> dict:
         "theme": style,
         "ai_generated": bool(args.get("ai_generate") and not args.get("slides") and not args.get("outline")),
         "brand_applied": brand is not None,
+        "template_applied": template_info is not None and template_info.get("status") == "success",
+        "template_info": template_info,
     }
 
 
@@ -1170,6 +1242,166 @@ def _load_brand_config(args: dict) -> dict | None:
         return brand if brand else None
     except Exception:
         return None
+
+
+def _load_template(prs: Presentation, template_path: str, theme: dict, args: dict) -> dict | None:
+    """Load a PPTX template and extract theme/slide layouts.
+
+    Args:
+        prs: Current Presentation object (already created)
+        template_path: Path to .pptx template file
+        theme: Theme dict to populate with extracted colors
+        args: Original args dict
+
+    Returns:
+        Dict with template info, or None if template can't be loaded
+    """
+    from pptx import Presentation as PrsLoader
+
+    tpl_path = Path(str(template_path)).expanduser()
+    if not tpl_path.exists():
+        return {"status": "error", "error": f"Template not found: {tpl_path}"}
+    if tpl_path.suffix.lower() not in (".pptx", ".potx", ".ppt"):
+        return {"status": "error", "error": f"Not a valid template file: {tpl_path}"}
+
+    try:
+        tpl = PrsLoader(str(tpl_path))
+    except Exception as e:
+        return {"status": "error", "error": f"Failed to open template: {e}"}
+
+    info = {
+        "status": "success",
+        "template_path": str(tpl_path.resolve()),
+        "template_slides": len(tpl.slides),
+        "template_slide_width": tpl.slide_width,
+        "template_slide_height": tpl.slide_height,
+        "slide_masters": len(tpl.slide_masters),
+        "slide_layouts": len(tpl.slide_layouts),
+        "extracted": {},
+    }
+
+    # 1. Copy slide size from template
+    prs.slide_width = tpl.slide_width
+    prs.slide_height = tpl.slide_height
+    info["extracted"]["slide_size"] = {
+        "width": tpl.slide_width,
+        "height": tpl.slide_height,
+    }
+
+    # 2. Extract colors from template's slide master
+    colors_extracted = {}
+    try:
+        master = tpl.slide_masters[0]
+        for shape in master.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        if run.font.color and run.font.color.rgb:
+                            rgb = str(run.font.color.rgb)
+                            if not colors_extracted:
+                                colors_extracted["text"] = rgb
+                        if run.font.size:
+                            colors_extracted["font_size"] = run.font.size
+                        if run.font.name:
+                            info["extracted"]["font_name"] = run.font.name
+            # Check fills
+            if hasattr(shape, 'fill') and shape.fill:
+                try:
+                    if shape.fill.type is not None:
+                        fc = shape.fill.fore_color
+                        if hasattr(fc, 'rgb') and fc.rgb:
+                            rgb_str = str(fc.rgb)
+                            if not colors_extracted.get("background"):
+                                colors_extracted["background"] = rgb_str
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 3. Extract from template slides (text and shapes)
+    try:
+        for slide in tpl.slides:
+            for shape in slide.shapes:
+                # Extract from text
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        for run in para.runs:
+                            try:
+                                if run.font.color and run.font.color.rgb:
+                                    rgb_str = str(run.font.color.rgb)
+                                    if not colors_extracted.get("text"):
+                                        colors_extracted["text"] = rgb_str
+                                if run.font.name and not info["extracted"].get("font_name"):
+                                    info["extracted"]["font_name"] = run.font.name
+                            except Exception:
+                                pass
+                # Extract fill color
+                try:
+                    if hasattr(shape, 'fill') and shape.fill.type is not None:
+                        fc = shape.fill.fore_color
+                        if hasattr(fc, 'rgb') and fc.rgb:
+                            rgb_str = str(fc.rgb)
+                            r, g, b = int(rgb_str[:2], 16), int(rgb_str[2:4], 16), int(rgb_str[4:], 16)
+                            # Classify by brightness and saturation
+                            brightness = (r + g + b) / 3
+                            saturation = max(r, g, b) - min(r, g, b)
+                            if saturation > 20 and brightness < 200 and "accent" not in colors_extracted:
+                                colors_extracted["accent"] = rgb_str
+                            elif brightness < 40 and "dark" not in colors_extracted:
+                                colors_extracted["dark"] = rgb_str
+                            elif brightness > 240 and "background" not in colors_extracted:
+                                colors_extracted["background"] = rgb_str
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    info["extracted"]["colors"] = colors_extracted
+
+    # 4. Apply extracted colors to theme
+    if colors_extracted.get("accent"):
+        theme["accent"] = f"#{colors_extracted['accent']}"
+    if colors_extracted.get("text"):
+        theme["dark"] = f"#{colors_extracted['text']}"
+    if colors_extracted.get("background"):
+        theme["background"] = f"#{colors_extracted['background']}"
+
+    # 5. Extract slide layouts and their placeholders
+    layouts_info = []
+    try:
+        for layout in tpl.slide_layouts[:6]:
+            placeholders = []
+            for ph in layout.placeholders:
+                placeholders.append({
+                    "idx": ph.placeholder_format.idx,
+                    "name": ph.name,
+                    "type": str(ph.placeholder_format.type) if ph.placeholder_format.type else "unknown",
+                    "left": ph.left,
+                    "top": ph.top,
+                    "width": ph.width,
+                    "height": ph.height,
+                })
+            layouts_info.append({
+                "name": layout.name,
+                "placeholders_count": len(placeholders),
+                "placeholders": placeholders[:8],
+            })
+    except Exception:
+        pass
+
+    info["extracted"]["layouts"] = layouts_info
+
+    # 6. Extract images/media from template (logos, backgrounds)
+    try:
+        image_count = 0
+        for rel in tpl.part.rels.values():
+            if "image" in rel.reltype:
+                image_count += 1
+        info["extracted"]["media_count"] = image_count
+    except Exception:
+        info["extracted"]["media_count"] = 0
+
+    return info
 
 
 def _apply_slide_master(prs: Presentation, brand: dict, theme: dict) -> None:
@@ -1223,6 +1455,7 @@ Style: {style}
 Slide count: {slide_count} (content slides, not counting title/TOC/thanks)
 
 Available layouts: title_slide, section_header, content_bullets, two_column,
+  three_column, code_block, flowchart, grid_2x2, comparison_plus,
   image_right, image_left, quote, comparison, timeline, kpi_dashboard,
   team, chart, table, chart_with_text
 
@@ -1234,7 +1467,11 @@ Rules:
 - Use kpi_dashboard for numeric metrics (3-4 KPIs with value/label/change).
 - Use chart for data trends (provide categories + series with real-looking values).
 - Use table for structured comparisons (provide column headers + row data).
-- Use comparison for A vs B analysis.
+- Use comparison for A vs B analysis. Use comparison_plus for feature matrix with ✓/✗.
+- Use three_column for comparing 3 options side by side.
+- Use grid_2x2 for feature overview cards (max 4 cards with title+description+icon).
+- Use code_block for code snippets with language badge.
+- Use flowchart for process steps (steps list with title+description each).
 - Use timeline for chronological events (provide date + label per milestone).
 - Use section_header to break long decks into parts.
 - Use two_column to present balanced perspectives.

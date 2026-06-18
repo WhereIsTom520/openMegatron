@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import socket
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -47,14 +48,23 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 SERVICES = {
-    "postgres": {"container": "megatron_postgres", "container_port": 5432, "default_host_port": 54320},
-    "redis": {"container": "megatron_redis", "container_port": 6379, "default_host_port": 6379},
-    "neo4j_http": {"container": "megatron_neo4j", "container_port": 7474, "default_host_port": 7474},
-    "neo4j_bolt": {"container": "megatron_neo4j", "container_port": 7687, "default_host_port": 7687},
+    "postgres": {"container": "megatron_postgres", "container_port": 5432, "default_host_port": 54320, "image": "pgvector/pgvector:pg15"},
+    "redis": {"container": "megatron_redis", "container_port": 6379, "default_host_port": 6379, "image": "redis:alpine"},
+    "neo4j_http": {"container": "megatron_neo4j", "container_port": 7474, "default_host_port": 7474, "image": "neo4j:5"},
+    "neo4j_bolt": {"container": "megatron_neo4j", "container_port": 7687, "default_host_port": 7687, "image": "neo4j:5"},
 }
 
+# Docker Hub mirrors for China (in order of preference)
+DOCKER_MIRRORS = [
+    "docker.m.daocloud.io",
+    "hub-mirror.c.163.com",
+    "dockerhub.timeweb.cloud",
+]
 
-def run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+
+def run(cmd: list[str], timeout: int = 30, show_progress: bool = False) -> subprocess.CompletedProcess:
+    if show_progress:
+        print(f"       Running: {' '.join(cmd[:5])}...")
     return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
 
 
@@ -82,8 +92,19 @@ def is_bindable(port: int) -> bool:
 def find_bindable_port(preferred: int, reserved: set[int] | None = None) -> int:
     reserved = reserved or set()
     port = int(preferred)
+
+    # WINDOWS 10013 BUG FIX: Windows randomly reserves MASSIVE port ranges!
+    # Use HIGH port numbers (18000+) that are almost NEVER reserved by Windows
+    safe_start = 18000
+    if os.name == "nt" and port < safe_start:
+        print(f"[INFO] Windows detected: using safe port range {safe_start}+")
+        print(f"       (Avoids WinError 10013 reserved port BUG)")
+        port = safe_start
+
     while port < 65535:
         if port not in reserved and is_bindable(port):
+            if port != preferred and preferred < safe_start:
+                print(f"[INFO] Original port {preferred} blocked, using port {port} instead")
             return port
         port += 1
     raise RuntimeError(f"No bindable port found from {preferred}")
@@ -116,7 +137,6 @@ def postgres_protocol_ready(port: int) -> bool:
             )
             return await conn.fetchval("SELECT 1") == 1
         except Exception as exc:
-            print(f"[WARN] PostgreSQL protocol probe failed: {exc}")
             return False
         finally:
             if conn is not None:
@@ -127,7 +147,7 @@ def postgres_protocol_ready(port: int) -> bool:
 
 def try_docker_base_cmd() -> list[str] | None:
     candidates = [["docker"], ["docker", "--context", "desktop-linux"]]
-    probe_timeout = int(os.environ.get("MEGATRON_DOCKER_PROBE_TIMEOUT", "8"))
+    probe_timeout = int(os.environ.get("MEGATRON_DOCKER_PROBE_TIMEOUT", "5"))
     for candidate in candidates:
         for probe in (["version"], ["ps"], ["info"]):
             result = run_probe(candidate + probe, timeout=probe_timeout)
@@ -150,7 +170,7 @@ def wake_docker_desktop() -> None:
     ]
     for exe in candidates:
         if exe.exists():
-            print("[INFO] Waking Docker Desktop...")
+            print("[INFO] Starting Docker Desktop... (this takes 10-30 seconds)")
             subprocess.Popen([str(exe)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
 
@@ -161,18 +181,48 @@ def docker_base_cmd() -> list[str]:
         return docker_cmd
 
     wake_docker_desktop()
-    wait_max = int(os.environ.get("MEGATRON_DOCKER_WAIT_MAX", "80"))
+    wait_max = int(os.environ.get("MEGATRON_DOCKER_WAIT_MAX", "30"))
     for index in range(1, wait_max + 1):
         docker_cmd = try_docker_base_cmd()
         if docker_cmd:
-            print("[OK] Docker engine is ready.")
+            print(f"[OK] Docker engine is ready (after {index * 2} seconds).")
             return docker_cmd
-        print(f"[INFO] Docker engine not ready yet: {index}/{wait_max}. Docker Desktop may need 1-3 minutes.")
-        time.sleep(3)
+        print(f"[INFO] Waiting for Docker: {index * 2}/{wait_max * 2} seconds...")
+        time.sleep(2)
+
+    # Auto-fix attempt: common Docker issues
+    print()
+    print("[WARN] Docker did not respond. Trying automatic fixes...")
+
+    # Fix 1: Try to restart Docker service (Windows)
+    if os.name == "nt":
+        print("[INFO] Attempting to restart Docker service...")
+        try:
+            subprocess.run(["sc", "stop", "com.docker.service"], timeout=10, capture_output=True)
+            time.sleep(3)
+            subprocess.run(["sc", "start", "com.docker.service"], timeout=10, capture_output=True)
+            # Wait and try again
+            for i in range(10):
+                docker_cmd = try_docker_base_cmd()
+                if docker_cmd:
+                    print("[OK] Docker service restarted successfully!")
+                    return docker_cmd
+                time.sleep(2)
+        except Exception as e:
+            print(f"[INFO] Could not restart Docker service (need admin rights): {e}")
 
     raise RuntimeError(
-        "Docker engine is unavailable. Open Docker Desktop, wait until it is running, "
-        "and make sure your Windows user can access Docker."
+        "\n[ERROR] Docker engine did not start within timeout.\n"
+        "\n"
+        "  Please try:\n"
+        "  1. Close and reopen Docker Desktop\n"
+        "  2. Right-click Docker icon → 'Restart'\n"
+        "  3. Wait for the status bar to turn GREEN\n"
+        "  4. Run this script again\n"
+        "\n"
+        "  If Docker won't start at all:\n"
+        "  - Reinstall Docker Desktop (https://www.docker.com/products/docker-desktop/)\n"
+        "  - Or run with SKIP_DOCKER=1 to use without databases\n"
     )
 
 
@@ -204,6 +254,108 @@ def container_exists(docker_cmd: list[str], container: str) -> bool:
 
 def remove_container(docker_cmd: list[str], container: str) -> None:
     run(docker_cmd + ["rm", "-f", container], timeout=30)
+
+
+def image_exists_locally(docker_cmd: list[str], image: str) -> bool:
+    return run(docker_cmd + ["inspect", "--type=image", image], timeout=10).returncode == 0
+
+
+def pull_image_with_mirror(docker_cmd: list[str], image: str) -> bool:
+    """Pull image with automatic mirror fallback for China users."""
+    print(f"       Pulling: {image}")
+
+    # Try direct pull first (fast if already cached or outside China)
+    try:
+        result = run(docker_cmd + ["pull", image], timeout=120)
+        if result.returncode == 0:
+            print(f"       ✓ Pulled: {image}")
+            return True
+    except subprocess.TimeoutExpired:
+        print(f"       ! Direct pull timed out, trying mirrors...")
+
+    # Try mirrors if direct pull failed
+    for mirror in DOCKER_MIRRORS:
+        print(f"       Trying mirror: {mirror}")
+        try:
+            result = run(docker_cmd + ["pull", f"{mirror}/{image}"], timeout=90)
+            if result.returncode == 0:
+                # Retag to original image name
+                run(docker_cmd + ["tag", f"{mirror}/{image}", image], timeout=10)
+                run(docker_cmd + ["rmi", f"{mirror}/{image}"], timeout=10)
+                print(f"       ✓ Pulled via {mirror}: {image}")
+                return True
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            continue
+
+    print(f"       ✗ Failed to pull {image} after trying all mirrors")
+    return False
+
+
+def prefetch_images(docker_cmd: list[str]) -> None:
+    """Prefetch Docker images before starting containers, with progress feedback."""
+    images_needed = set()
+    for spec in SERVICES.values():
+        if not container_exists(docker_cmd, spec["container"]):
+            images_needed.add(spec["image"])
+
+    if not images_needed:
+        print("[OK] All containers exist, no images to pull.")
+        return
+
+    # Filter out already-cached images
+    to_pull = [img for img in images_needed if not image_exists_locally(docker_cmd, img)]
+    if not to_pull:
+        print("[OK] All images already cached locally.")
+        return
+
+    print(f"[INFO] Need to pull {len(to_pull)} Docker images...")
+    print(f"       This may take 1-5 minutes on first run.")
+    print(f"       Images: {', '.join(sorted(to_pull))}")
+    print()
+
+    for i, image in enumerate(sorted(to_pull), 1):
+        print(f"  [{i}/{len(to_pull)}] Pulling {image}...")
+        success = pull_image_with_mirror(docker_cmd, image)
+        if not success:
+            print(f"  [WARN] Could not pull {image}. Will retry during compose up.")
+        print()
+
+    print("[OK] Image prefetch complete.")
+
+
+def auto_fix_docker(docker_cmd: list[str]) -> None:
+    """Automatically detect and fix common Docker issues."""
+    print("[INFO] Running Docker health checks...")
+    fixes_applied = 0
+
+    # Fix 1: Remove stopped containers with our names
+    for name in ["megatron_postgres", "megatron_redis", "megatron_neo4j"]:
+        if container_exists(docker_cmd, name):
+            # Check if it's running
+            result = run(docker_cmd + ["inspect", "--format='{{.State.Running}}'", name], timeout=10)
+            if "false" in result.stdout.lower():
+                print(f"[INFO] Removing stopped container: {name}")
+                remove_container(docker_cmd, name)
+                fixes_applied += 1
+
+    # Fix 2: Check for Docker network issues
+    result = run(docker_cmd + ["network", "ls"], timeout=10)
+    if result.returncode != 0:
+        print("[WARN] Docker network error, attempting to reset...")
+        run(docker_cmd + ["network", "prune", "-f"], timeout=30)
+        fixes_applied += 1
+
+    # Fix 3: Prune dangling images (frees up space and avoids corruption)
+    print("[INFO] Cleaning up Docker cache...")
+    run(docker_cmd + ["image", "prune", "-f"], timeout=60)
+
+    if fixes_applied > 0:
+        print(f"[OK] Applied {fixes_applied} automatic fixes to Docker.")
+    else:
+        print("[OK] Docker environment looks healthy.")
+    print()
 
 
 def load_toml(path: Path) -> dict:
@@ -244,7 +396,7 @@ def choose_service_ports(docker_cmd: list[str], data: dict, blocked_ports: set[i
             recreate.add(spec["container"])
 
     for container in sorted(recreate):
-        print(f"[WARN] Recreating {container} because required host port mappings were missing.")
+        print(f"[INFO] Recreating {container} (port mapping changed)...")
         remove_container(docker_cmd, container)
 
     return ports
@@ -349,23 +501,29 @@ def write_compose(path: Path, ports: dict[str, int]) -> None:
 
 
 def wait_for(predicate, label: str, attempts: int, delay: float = 2.0) -> None:
+    start_time = time.time()
     for index in range(1, attempts + 1):
         if predicate():
-            print(f"[OK] {label} is ready.")
+            elapsed = int(time.time() - start_time)
+            print(f"[OK] {label} is ready (after {elapsed} seconds).")
             return
-        print(f"[INFO] Waiting for {label}: {index}/{attempts}")
+        elapsed = int(time.time() - start_time)
+        eta = int(attempts * delay - elapsed)
+        print(f"[INFO] Waiting for {label}: {index}/{attempts} (ETA ~{eta}s)...")
         time.sleep(delay)
-    raise RuntimeError(f"{label} did not become ready after {attempts} checks.")
+    raise RuntimeError(f"{label} did not become ready after {int(attempts * delay)} seconds.")
 
 
 def wait_for_services(docker_cmd: list[str], ports: dict[str, int]) -> None:
-    db_wait = int(os.environ.get("MEGATRON_DB_WAIT_MAX", "90"))
-    neo4j_wait = int(os.environ.get("MEGATRON_NEO4J_WAIT_MAX", "90"))
-    redis_wait = int(os.environ.get("MEGATRON_REDIS_WAIT_MAX", "45"))
+    db_wait = int(os.environ.get("MEGATRON_DB_WAIT_MAX", "30"))
+    neo4j_wait = int(os.environ.get("MEGATRON_NEO4J_WAIT_MAX", "45"))
+    redis_wait = int(os.environ.get("MEGATRON_REDIS_WAIT_MAX", "20"))
+
+    print()
+    print("[INFO] Waiting for database services to become healthy...")
+    print()
 
     wait_for(lambda: run(docker_cmd + ["exec", "megatron_postgres", "pg_isready", "-U", "root"], timeout=10).returncode == 0, "PostgreSQL (container)", db_wait)
-    # Also verify the host port is actually accepting TCP connections
-    # (Docker port mapping can take a few seconds after the container is ready)
     wait_for(lambda: tcp_open(ports["postgres"], timeout=2.0), f"PostgreSQL TCP port {ports['postgres']}", 15, delay=2.0)
     try:
         wait_for(lambda: postgres_protocol_ready(ports["postgres"]), "PostgreSQL protocol", 3, delay=2.0)
@@ -432,21 +590,89 @@ def main() -> int:
     parser.add_argument("--toml", required=True)
     parser.add_argument("--runtime-dir", default=".runtime")
     parser.add_argument("--mode", choices=["API", "CLI", "TEST"], default="CLI")
+    parser.add_argument("--fix-win10013", action="store_true", help="Fix Windows 10013 reserved port bug (requires admin)")
     args = parser.parse_args()
+
+    # Quick Windows 10013 BUG fix
+    if args.fix_win10013:
+        print("=" * 60)
+        print("  Fixing Windows 10013 reserved port BUG...")
+        print("  This requires ADMINISTRATOR privileges!")
+        print("=" * 60)
+        print()
+        import subprocess
+        try:
+            # Set dynamic port range to start from 50000 instead of 1024
+            print("[1/3] Setting TCP dynamic port range...")
+            subprocess.run(
+                ["netsh", "int", "ipv4", "set", "dynamicport", "tcp", "start=50000", "num=15535"],
+                check=True, capture_output=True
+            )
+            print("        OK: TCP dynamic port range now starts at 50000")
+
+            print("[2/3] Excluding our port range from reservation...")
+            # Exclude 8000-9000 from dynamic port allocation
+            try:
+                subprocess.run(
+                    ["netsh", "int", "ipv4", "add", "excludedportrange", "tcp", "8000", "1000"],
+                    check=True, capture_output=True
+                )
+                print("        OK: Excluded ports 8000-8999 from Windows reservation")
+            except subprocess.CalledProcessError:
+                print("        (may already be excluded - ignoring)")
+
+            print("[3/3] Restarting NAT service...")
+            subprocess.run(["net", "stop", "winnat"], check=True, capture_output=True)
+            subprocess.run(["net", "start", "winnat"], check=True, capture_output=True)
+
+            print()
+            print("=" * 60)
+            print("[OK] Windows 10013 BUG has been fixed!")
+            print("     Ports 8000+ should now work correctly.")
+            print("=" * 60)
+            return 0
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Command failed: {e}")
+            print()
+            print("You need to run this as ADMINISTRATOR!")
+            print("  1. Right-click Command Prompt")
+            print("  2. Select 'Run as administrator'")
+            print("  3. Run this script again")
+            return 1
 
     toml_path = Path(args.toml)
     runtime_dir = Path(args.runtime_dir)
     runtime_dir.mkdir(parents=True, exist_ok=True)
     data = load_toml(toml_path)
 
+    print()
+    print("=" * 60)
+    print("  OpenMegatron Docker Database Setup")
+    print("=" * 60)
+    print()
+
     docker_cmd = docker_base_cmd()
     compose = compose_cmd(docker_cmd)
+
+    # Auto-fix common Docker issues BEFORE starting anything
+    auto_fix_docker(docker_cmd)
+
+    print()
+    print("[1/4] Checking ports...")
     ports = choose_service_ports(docker_cmd, data)
     update_model_toml(toml_path, data, ports)
     write_compose(Path("docker-compose.yml"), ports)
 
+    print()
+    print("[2/4] Prefetching Docker images...")
+    prefetch_images(docker_cmd)
+
+    print()
+    print("[3/4] Starting containers...")
     ports = compose_up_with_retry(compose, docker_cmd, toml_path, data, runtime_dir, ports)
 
+    print()
+    print("[4/4] Waiting for database health...")
     wait_for_services(docker_cmd, ports)
 
     backend_port = None
@@ -461,7 +687,15 @@ def main() -> int:
 
     write_runtime_env(runtime_dir / "runtime_env.cmd", ports, backend_port)
     write_ports_json(runtime_dir, ports, backend_port)
-    print("[OK] Runtime setup complete.")
+
+    print()
+    print("=" * 60)
+    print("[OK] Docker databases setup complete!")
+    print(f"     PostgreSQL: port {ports['postgres']}")
+    print(f"     Redis:      port {ports['redis']}")
+    print(f"     Neo4j:      ports {ports['neo4j_http']} (HTTP), {ports['neo4j_bolt']} (Bolt)")
+    print("=" * 60)
+    print()
     return 0
 
 
@@ -469,5 +703,12 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"[ERROR] {exc}")
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print()
+        print("Troubleshooting tips:", file=sys.stderr)
+        print("  1. Ensure Docker Desktop is running (check status bar)", file=sys.stderr)
+        print("  2. Try: docker system prune -f (cleans up old containers)", file=sys.stderr)
+        print("  3. Try: docker ps -a (list all containers)", file=sys.stderr)
+        print("  4. Check network/VPN/proxy settings", file=sys.stderr)
+        print("  5. Run with SKIP_DOCKER=1 to bypass database setup", file=sys.stderr)
         raise SystemExit(1)

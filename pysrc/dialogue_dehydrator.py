@@ -203,6 +203,8 @@ class KnowledgePipeline:
     async def __aenter__(self):
         self.model = self.llm_cfg.pop("model", "gpt-4o-mini")
         self.extra_params = self.llm_cfg.pop("extra_params", {})
+        if not str(self.llm_cfg.get("api_key") or "").strip():
+            self.llm_cfg["api_key"] = "missing-api-key"
         self.client = AsyncOpenAI(**self.llm_cfg)
         await self._init_neo4j()
         await self._init_postgres()
@@ -815,6 +817,7 @@ class KnowledgePipeline:
                         'venue', 'project', 'session', 'decision', 'alternative',
                         'rag_entity', 'document', 'community', 'memory_card',
                         'owner', 'scope', 'hyperedge', 'literature_review',
+                        'option',
                     }
                     return (kind if kind in valid else 'entity', label)
                 return ('entity', str(raw_id))
@@ -830,6 +833,7 @@ class KnowledgePipeline:
                 "memory_card": "MemoryCard", "owner": "Owner",
                 "scope": "Scope", "hyperedge": "HyperEdge",
                 "literature_review": "LiteratureReview",
+                "option": "Option",
             }
 
             type_map = {

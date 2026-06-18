@@ -3,8 +3,10 @@ aiohttp
 apscheduler
 asyncpg
 beautifulsoup4
+cryptography
 fastapi
 json-repair
+matplotlib
 mcp
 neo4j
 numpy
@@ -22,6 +24,7 @@ redis
 scikit-learn
 sentence-transformers
 tomli; python_version < "3.11"
+tomli-w
 torch
 uvicorn
 websockets

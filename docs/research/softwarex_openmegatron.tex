@@ -62,7 +62,7 @@ C4 & Code versioning system used & Git. \\
 \hline
 C5 & Software code languages, tools, and services used & Python 3.11+, TypeScript, React, Vite, FastAPI, Redis, PostgreSQL, pgvector, Neo4j, SQLite, OpenAI-compatible model APIs, sentence-transformers, scikit-learn, PyTorch, Docker Compose. \\
 \hline
-C6 & Compilation requirements, operating environments \& dependencies & Windows, Linux, or macOS with Python 3.11+, Node.js 18+, and optionally Docker. Runtime services include Redis, PostgreSQL with pgvector, and Neo4j. Python dependencies are listed in \texttt{pysrc/requirements.txt}; frontend dependencies are listed in \texttt{package.json}. \\
+C6 & Compilation requirements, operating environments \& dependencies & Windows, Linux, or macOS with Python 3.11+, Node.js 18+, and Docker Compose for the full agent-memory and RAG configuration. Runtime services include Redis, PostgreSQL with pgvector, and Neo4j. Python dependencies are listed in \texttt{pysrc/requirements.txt}; frontend dependencies are listed in \texttt{package.json}. \\
 \hline
 C7 & If available Link to developer documentation/manual & Repository documentation: \url{https://github.com/WhereIsTom520/openMegatron}. Local documentation includes \texttt{README.md} and \texttt{README\_CN.md}. \\
 \hline
@@ -80,7 +80,7 @@ OpenMegatron addresses this gap by providing a modular research software platfor
 
 The scientific problem solved by OpenMegatron is not a single benchmark task. Rather, it provides an experimental workbench for studying how LLM-agent subsystems interact in realistic multi-step workflows. Researchers can use it to examine questions such as: how should a task be routed to a skill pack; when should an agent use local memory, graph traversal, or hybrid RAG; what trajectory features predict successful execution; and how can error-repair strategies be evaluated across repeated tasks. These questions are relevant to software engineering, information retrieval, human--AI interaction, and knowledge management.
 
-The intended experimental setting is a local or self-hosted workstation. A user starts the backend API and the React frontend, configures one or more OpenAI-compatible model providers, optionally starts Redis, PostgreSQL with pgvector, and Neo4j through Docker Compose, and interacts with the agent through the web interface or API. During a session, the agent routes requests to loaded skills, invokes tools, writes memory records, retrieves relevant context, and stores task traces. The same system can be run in a lightweight mode for skill and routing experiments or in a fuller mode with external storage and model APIs for memory and RAG experiments.
+The intended experimental setting is a local or self-hosted workstation. A user starts Redis, PostgreSQL with pgvector, and Neo4j through Docker Compose, configures one or more OpenAI-compatible model providers, and then launches the backend API and React frontend through the provided launcher. During a session, the agent routes requests to loaded skills, invokes tools, writes memory records, retrieves relevant context, and stores task traces. If the storage services are not available, the launcher and API can still be used for dependency checks, configuration work, and degraded status inspection, but full agent execution, memory recall, hybrid RAG, and graph-memory experiments require the Docker-backed services.
 
 OpenMegatron is related to prior work in three areas. Retrieval-augmented generation retrieves external information for generation, typically from vector stores \cite{lewis2020retrieval}. GraphRAG-style systems enrich retrieval with entity and relation structure \cite{edge2024graphrag}. Memory-augmented agents maintain persistent state across interactions \cite{park2023generative,zhang2024memgpt}. OpenMegatron differs from these systems as a software contribution: it packages routing, tool execution, ontology-guided memory, RAG, feedback collection, and optional reward modeling into one inspectable platform, allowing researchers to modify and evaluate each component independently.
 
@@ -92,7 +92,7 @@ OpenMegatron uses a Python backend and a React/TypeScript frontend. The backend 
 
 At runtime, a user request enters the agent loop. The request is analyzed by the skill router, which scores candidate skills using metadata, keywords, loaded skill documentation, and task-intent signals. A model-tier component assigns the task to a lite, standard, or advanced model tier depending on complexity. The agent then composes context from short-term conversation state, persistent memory, RAG retrieval, and skill instructions. Tool calls are executed through a managed runtime and recorded with decision and trajectory metadata. Results are returned to the user and can be stored in memory for later retrieval.
 
-The storage layer is intentionally heterogeneous. Redis stores short-term conversation buffers and cache entries. PostgreSQL with pgvector stores episodic memory records and vector embeddings. Neo4j stores graph-oriented relations and supports traversal use cases. SQLite is used for local trajectory and model registry persistence, which keeps learning experiments reproducible without requiring a separate analytics database. This separation makes the system suitable for controlled ablation experiments: researchers can run only the routing layer, add episodic memory, add graph memory, or add reward modeling as needed.
+The storage layer is intentionally heterogeneous. Redis stores short-term conversation buffers and cache entries. PostgreSQL with pgvector stores episodic memory records and vector embeddings. Neo4j stores graph-oriented relations and supports traversal use cases. SQLite is used for local trajectory, model-registry, and lightweight learning metadata persistence; it does not replace the Redis/PostgreSQL/Neo4j memory stack in the current implementation. This separation makes the system suitable for controlled ablation experiments over the implemented storage components while keeping trajectory and reward-model records portable.
 
 The ontology layer defines a typed memory schema. Its default schema includes memory records, entities, topics, sessions, projects, skills, tools, claims, evidence, artifacts, owners, scopes, papers, authors, venues, literature reviews, decisions, alternatives, documents, communities, and memory cards. Relation types include mentions, topic, related, produces, uses, verified\_by, belongs\_to, cites, authored\_by, published\_in, reviews, surveys, extends, and member. Hyperedge types represent multi-party events such as memory capture, task experience, skill distillation, literature review, and decision recording. This schema is implemented in code rather than left as a narrative convention, which allows user interfaces, graph traversal, and memory export tools to share the same structure.
 
@@ -139,21 +139,19 @@ memory.add_memory(session_id, result.summary, entities=result.entities)
 
 \section{Illustrative examples}
 
-This section describes representative workflows that can be reproduced with the repository after installing dependencies and configuring the model provider.
+This section describes representative workflows that can be reproduced with the repository after installing dependencies, starting the required storage services, and configuring the model provider.
 
 \subsection{Starting a local research agent}
 
-The user installs Python and Node.js dependencies, starts the optional storage services, and launches the backend and frontend:
+On Windows, the recommended path is the bundled launcher:
 
 \begin{lstlisting}[language=bash]
-python scripts/runtime_setup.py
-npm install
-docker-compose up -d
-python pysrc/agent.py --api
-npm run dev
+start.bat
+start.bat health
+start.bat test
 \end{lstlisting}
 
-The web application then connects to the backend API. The user can ask the system to summarize a paper, search for relevant literature, inspect memory, or invoke a code-related skill. During the interaction, the agent selects a skill pack and records operational metadata. This example demonstrates how OpenMegatron can be used as a local, inspectable alternative to hosted agent systems.
+The launcher creates or reuses the Python virtual environment, installs frontend dependencies when needed, starts the Docker-backed Redis/PostgreSQL/Neo4j services, starts the backend API, starts the React frontend, and chooses available ports. On Unix-like shells, the equivalent script is \texttt{bash start.sh}. The web application then connects to the backend API. The user can ask the system to summarize a paper, search for relevant literature, inspect memory, or invoke a code-related skill. During the interaction, the agent selects a skill pack and records operational metadata. This example demonstrates how OpenMegatron can be used as a local, inspectable alternative to hosted agent systems.
 
 \subsection{Ontology-guided memory and retrieval}
 
@@ -211,11 +209,11 @@ Operating system & Windows, Linux, macOS \\
 \hline
 Programming languages & Python, TypeScript \\
 \hline
-External services & Optional Redis, PostgreSQL with pgvector, Neo4j, and OpenAI-compatible model APIs \\
+External services & Redis, PostgreSQL with pgvector, and Neo4j for the full local memory/RAG stack; OpenAI-compatible model APIs or local compatible endpoints for model calls \\
 \hline
-Installation & \texttt{python scripts/runtime\_setup.py}; \texttt{npm install}; optional \texttt{docker-compose up -d} \\
+Installation & \texttt{start.bat} on Windows, or \texttt{bash start.sh} on Unix-like shells; the launcher invokes dependency setup and Docker-backed runtime setup for full mode \\
 \hline
-Execution & \texttt{python pysrc/agent.py --api}; \texttt{npm run dev}; or \texttt{start.bat} on Windows \\
+Execution & \texttt{start.bat}; manual backend/frontend commands are mainly for debugging \\
 \hline
 \end{tabularx}
 \caption{Current executable software version.}

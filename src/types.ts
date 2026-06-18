@@ -340,6 +340,7 @@ export interface EvolutionProposalsResponse {
 
 export interface MemoryGraphNode {
   id: string;
+  kind?: string;
   label?: string;
   type?: string;
   text?: string;

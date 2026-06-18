@@ -810,6 +810,8 @@ class YuanGeAgent:
         self.enable_background_thinker = runtime_bool("enable_background_thinker", False)
         self.background_thinker_interval_sec = max(60, runtime_int("background_thinker_interval_sec", 1800))
         self.background_thinker_idle_sec = max(60, runtime_int("background_thinker_idle_sec", 900))
+        self.enable_skill_health_check = runtime_bool("enable_skill_health_check", True)
+        self.skill_health_check_interval_sec = max(300, runtime_int("skill_health_check_interval_sec", 3600))
         self.skill_budget_mode = runtime_mode("skill_budget_mode", "auto")
         self.top_k_skills = max(1, runtime_int("top_k_skills", 3))
         self.max_prompt_skills = max(self.top_k_skills, runtime_int("max_prompt_skills", 8))
@@ -1119,7 +1121,9 @@ class YuanGeAgent:
         selected_model = str(model or provider_cfg.get("model") or self.model or "gpt-4o-mini").strip()
         api_key = str(provider_cfg.get("api_key") or "").strip()
         base_url = provider_cfg.get("base_url")
-        client_kwargs = {"api_key": api_key}
+        # Keep the backend/status/config UI alive when no provider key exists.
+        # Chat endpoints guard missing keys before making real LLM calls.
+        client_kwargs = {"api_key": api_key or "missing-api-key"}
         if base_url:
             client_kwargs["base_url"] = str(base_url)
         self.client = AsyncOpenAI(**client_kwargs)
@@ -1209,7 +1213,7 @@ class YuanGeAgent:
         """Check whether the selected model name is likely to accept images."""
         model_lower = str(self.model or "").lower()
         vision_indicators = [
-            "vision", "vl", "holo", "gemini", "gpt-4o",
+            "vision", "vl", "holo", "gemini", "external_agent", "gpt-4o",
             "gpt-4-turbo", "gpt-4.1", "qwen-vl", "llava", "cogvlm",
             "pixtral", "multimodal",
         ]
@@ -1376,6 +1380,50 @@ class YuanGeAgent:
             pass
         return "general"
 
+    def _get_ontology_service_and_pool(self):
+        """Return (MemoryService, asyncpg.Pool) for ontology writes, or (None, None)."""
+        db = getattr(getattr(self, 'memory_engine', None), 'db', None)
+        if db is None:
+            return None, None
+        svc = getattr(db, 'service', None)
+        if svc is None or not hasattr(svc, '_upsert_ontology_node'):
+            return None, None
+        pool = getattr(db, 'pg_pool', None)
+        if pool is None:
+            return None, None
+        return svc, pool
+
+    async def _register_skill_ontology(self, skill_name: str, skill_info: dict, adapter):
+        """Register a single skill and its tool as ontology nodes."""
+        try:
+            svc, pool = self._get_ontology_service_and_pool()
+            if svc is None or pool is None:
+                return
+            async with pool.acquire() as conn:
+                # Skill node
+                skill_id = svc.ontology_node_id("skill", skill_name)
+                await svc._upsert_ontology_node(conn, skill_id, "skill", skill_name, {
+                    "description": (skill_info.get("description") or "")[:1000],
+                    "category": skill_info.get("category", "general"),
+                    "capabilities": skill_info.get("capabilities", []),
+                    "consumes": skill_info.get("consumes", {}),
+                    "produces": skill_info.get("produces", {}),
+                    "risk": skill_info.get("risk", ""),
+                    "keywords": skill_info.get("keywords", [])[:20],
+                })
+                # Tool node
+                tool_name = adapter.name if hasattr(adapter, 'name') else f"tool:{skill_name}"
+                tool_id = svc.ontology_node_id("tool", tool_name)
+                await svc._upsert_ontology_node(conn, tool_id, "tool", tool_name, {
+                    "skill": skill_name,
+                    "description": (adapter.description or "")[:500] if hasattr(adapter, 'description') else "",
+                })
+                # uses relation: skill -> tool
+                await svc._upsert_link(conn, skill_id, tool_id, "uses", 1.0,
+                    {"skill": skill_name, "tool": tool_name})
+        except Exception:
+            pass  # ontology write must never block skill loading
+
     async def _load_skills(self):
         if not self.skills_dir.exists():
             return
@@ -1460,6 +1508,9 @@ class YuanGeAgent:
                 agent=self
             )
             self.tool_manager.register(adapter)
+
+            # ── Register skill + tool as ontology nodes ──
+            await self._register_skill_ontology(skill_name, self.loaded_skills[skill_name], adapter)
 
         if hasattr(self, 'memory_engine') and self.memory_engine.emb_model:
             for sname, info in self.loaded_skills.items():
@@ -1573,6 +1624,11 @@ class YuanGeAgent:
             await self.dehydrator.process("system_background", "Background Thought:\n" + json.dumps(thought, ensure_ascii=False))
             if self.broadcast_event:
                 await self.broadcast_event("background_thought", {"summary": str(thought.get("summary", ""))[:300], "kind": thought.get("kind")})
+
+            # ── Periodic skill health check ──
+            if self.enable_skill_health_check:
+                await self._run_skill_health_check()
+
         except Exception as e:
             logger.warning(f"Background thought failed: {e}")
 
@@ -2152,6 +2208,512 @@ class YuanGeAgent:
             }
         except Exception as e:
             return {"status": "error", "message": f"Skill promotion failed: {e}", "completed": True}
+
+    # ── Workflow → Skill Promotion ──────────────────────────────────────────
+
+    async def _maybe_prompt_skill_creation(self, task_trace: dict, session_id: str):
+        """Check for a pending skill promotion candidate and ask the user.
+
+        Called after _learn_from_task_trace in all task completion paths.
+        Only prompts when: should_create_skill=True, reward>0.5, ≥2 tool calls.
+        Deduplicates by goal_type within 24h.
+        """
+        try:
+            latest_hash = await self.ctx.redis.get(f"skill_promotion_latest:{session_id}")
+            if not latest_hash:
+                return
+            raw = await self.ctx.redis.hget("skill_promotion_candidates", latest_hash)
+            if not raw:
+                return
+            candidate = json.loads(raw)
+        except Exception:
+            return
+
+        goal_type = candidate.get("goal_type", "task")
+        chain = candidate.get("successful_chain", [])
+        tool_count = candidate.get("tool_count", 0)
+        chain_display = " → ".join(chain[:5]) if chain else f"{tool_count} tool calls"
+
+        prompt = (
+            f"This task ('{goal_type}') used {tool_count} tool calls: {chain_display}. "
+            f"Save this workflow as a reusable skill?"
+        )
+        try:
+            confirmed = await self._request_user_confirmation(
+                prompt=prompt,
+                session_id=session_id,
+            )
+            if confirmed:
+                await self._create_skill_from_pattern(candidate, session_id)
+                # Clean up the candidate so it doesn't prompt again
+                await self.ctx.redis.hdel("skill_promotion_candidates", latest_hash)
+                await self.ctx.redis.delete(f"skill_promotion_latest:{session_id}")
+        except Exception as e:
+            logger.warning(f"Skill creation prompt failed: {e}")
+
+    async def _create_skill_from_pattern(self, candidate: dict, session_id: str) -> dict:
+        """Generate a SKILL.md + scripts/main.py from a workflow pattern.
+
+        Uses LLM inference to convert the tool chain into a reusable skill
+        with parameterized entry points.
+        """
+        goal_type = candidate.get("goal_type", "generated_task")
+        chain = candidate.get("successful_chain", [])
+        preconditions = candidate.get("preconditions", [])
+        notes = candidate.get("notes", "")
+        examples = candidate.get("example_user_goals", [])
+
+        # Generate skill name from goal_type
+        skill_name = self._normalize_generated_skill_name(
+            goal_type.replace(" ", "_"), "generated_workflow"
+        )
+
+        # Use LLM to generate the skill definition
+        prompt = (
+            "Convert this successful agent workflow into one reusable skill. "
+            "The skill should orchestrate the same tool chain when given a similar user goal. "
+            "Return one JSON object only. No markdown. "
+            "Schema: {"
+            "\"skill_name\": snake_case string, "
+            "\"description\": string (what this skill does, when to use it), "
+            "\"category\": string (code/research/agent/office/media), "
+            "\"keywords\": string[], "
+            "\"capabilities\": string[], "
+            "\"consumes\": object, "
+            "\"produces\": object, "
+            "\"side_effects\": string[], "
+            "\"risk\": string (low/medium/high), "
+            "\"parameters\": JSON schema object with type=object/properties/required, "
+            "\"instructions\": string (detailed SKILL.md body explaining how to execute the workflow)"
+            "}. "
+            "The instructions should describe the tool chain step-by-step, "
+            "including what each tool does and how results flow between steps.\n\n"
+            f"Goal type: {goal_type}\n"
+            f"Tool chain: {json.dumps(chain)}\n"
+            f"Preconditions: {json.dumps(preconditions)}\n"
+            f"Notes: {notes}\n"
+            f"Example user goals: {json.dumps(examples[:3])}\n"
+        )
+        try:
+            res = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You convert agent workflow patterns into durable, well-scoped skills. Return JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                **self.extra_params
+            )
+            definition = json.loads(res.choices[0].message.content)
+            if not isinstance(definition, dict):
+                definition = {}
+        except Exception as e:
+            logger.warning(f"Workflow skill inference failed, using fallback: {e}")
+            definition = {}
+
+        # Merge with fallback defaults
+        skill_name = self._normalize_generated_skill_name(
+            definition.get("skill_name", goal_type.replace(" ", "_")),
+            "generated_workflow"
+        )
+        description = definition.get("description") or f"Reusable workflow for: {goal_type}. Tool chain: {' → '.join(chain)}."
+        category = definition.get("category") or "agent"
+        keywords = definition.get("keywords") or chain[:5] or ["generated", "workflow"]
+        instructions = definition.get("instructions") or (
+            f"# {skill_name}\n\n{description}\n\n"
+            f"## Workflow\n\n"
+            + "\n".join(f"{i+1}. Call `{tool}`" for i, tool in enumerate(chain))
+            + f"\n\n## Notes\n{notes}\n"
+        )
+
+        # Write skill files
+        skill_root = self.skills_dir / "generated"
+        skill_dir = skill_root / skill_name
+        if skill_dir.exists():
+            import hashlib
+            suffix = hashlib.sha256(skill_name.encode()).hexdigest()[:8]
+            skill_name = self._normalize_generated_skill_name(f"{skill_name}_{suffix}", "generated_workflow")
+            skill_dir = skill_root / skill_name
+
+        scripts_dir = skill_dir / "scripts"
+        try:
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            scripts_dir.mkdir(exist_ok=True)
+
+            # Build SKILL.md with frontmatter
+            parameters = self._convert_parameters_to_schema(definition.get("parameters") or {})
+            metadata = {
+                "name": skill_name,
+                "description": description,
+                "category": category,
+                "keywords": keywords,
+                "capabilities": definition.get("capabilities") or ["orchestrate", "execute"],
+                "consumes": definition.get("consumes") or {},
+                "produces": definition.get("produces") or {},
+                "side_effects": definition.get("side_effects") or ["Orchestrates a multi-tool workflow."],
+                "risk": definition.get("risk") or "medium",
+                "parameters": parameters,
+                "entry_function": "main"
+            }
+            front_matter_lines = ["---"]
+            for key, value in metadata.items():
+                front_matter_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+            front_matter_lines.append("---")
+            skill_md = (
+                "\n".join(front_matter_lines)
+                + f"\n\n{instructions}\n\n"
+                + "Generated from a successful agent workflow. Review before broad reuse.\n"
+            )
+
+            # Generate a simple main.py that documents the workflow
+            main_py = (
+                '"""Auto-generated workflow skill: {name}."""\n'
+                'import json\n'
+                'import sys\n\n'
+                '# Tool chain: {chain}\n'
+                '# Goal type: {goal_type}\n'
+                '#\n'
+                '# This skill was generated from a successful agent workflow.\n'
+                '# The agent should execute this tool chain when the user goal matches.\n\n'
+                'WORKFLOW = {{\n'
+                '    "goal_type": {goal_type!r},\n'
+                '    "chain": {chain!r},\n'
+                '    "preconditions": {preconditions!r},\n'
+                '}}\n\n'
+                'def main():\n'
+                '    """Return the workflow definition for the agent to execute."""\n'
+                '    params = {{}}\n'
+                '    if len(sys.argv) > 1 and sys.argv[1].strip():\n'
+                '        try:\n'
+                '            params = json.loads(sys.argv[1])\n'
+                '        except Exception:\n'
+                '            pass\n'
+                '    print(json.dumps({{\n'
+                '        "workflow": WORKFLOW,\n'
+                '        "params": params,\n'
+                '        "message": "Execute the tool chain in WORKFLOW[\'chain\'] with the provided params."\n'
+                '    }}, ensure_ascii=False))\n\n'
+                'if __name__ == "__main__":\n'
+                '    main()\n'
+            ).format(
+                name=skill_name,
+                chain=json.dumps(chain),
+                goal_type=goal_type,
+                preconditions=json.dumps(preconditions),
+            )
+
+            async with aiofiles.open(skill_dir / "SKILL.md", "w", encoding="utf-8") as f:
+                await f.write(skill_md)
+            async with aiofiles.open(scripts_dir / "main.py", "w", encoding="utf-8") as f:
+                await f.write(main_py)
+
+            await self._load_skills()
+            logger.info(f"Workflow skill created: {skill_name} at {skill_dir}")
+            if self.broadcast_event:
+                await self.broadcast_event("skill_created", {
+                    "skill_name": skill_name,
+                    "goal_type": goal_type,
+                    "chain": chain,
+                    "session_id": session_id,
+                })
+            return {
+                "status": "success",
+                "message": f"Created workflow skill '{skill_name}'.",
+                "skill_name": skill_name,
+                "skill_dir": str(skill_dir),
+                "completed": True
+            }
+        except Exception as e:
+            logger.error(f"Failed to create workflow skill: {e}")
+            return {"status": "error", "message": f"Skill creation failed: {e}", "completed": True}
+
+    # ── Promoted Skill Lifecycle Tracking ──────────────────────────────────
+
+    async def _record_promoted_skill_usage(self, skill_name: str, trace: dict):
+        """Track when a promoted (generated) skill is used — success, reward, latency.
+
+        This builds a per-skill health profile in Redis so the framework can:
+          - Detect skill quality regression
+          - Auto-deprecate abandoned or failing skills
+          - Rank promoted skills by real-world performance
+        """
+        if not skill_name or not skill_name.startswith("generated/"):
+            return  # only track auto-generated skills
+        try:
+            reward = float((trace.get("reward_profile") or {}).get("reward", 0))
+            success = bool(trace.get("success", False))
+            tool_calls = trace.get("tool_calls", []) or []
+            total_ms = sum(float(c.get("duration_ms", 0)) for c in tool_calls)
+
+            key = "promoted_skill_health"
+            existing_raw = await self.ctx.redis.hget(key, skill_name)
+            existing = json.loads(existing_raw) if existing_raw else {}
+            now = time.time()
+
+            calls = int(existing.get("calls", 0)) + 1
+            successes = int(existing.get("successes", 0)) + (1 if success else 0)
+            total_reward = float(existing.get("total_reward", 0)) + reward
+            total_latency = float(existing.get("total_latency_ms", 0)) + total_ms
+
+            health = {
+                "skill_name": skill_name,
+                "calls": calls,
+                "successes": successes,
+                "failures": calls - successes,
+                "success_rate": successes / calls,
+                "avg_reward": round(total_reward / calls, 4),
+                "avg_latency_ms": round(total_latency / calls, 1),
+                "last_used": now,
+                "first_used": existing.get("first_used", now),
+                "status": "active",
+            }
+            # Health check: flag regression
+            if calls >= 5 and health["success_rate"] < 0.5:
+                health["status"] = "degraded"
+            if calls >= 3 and health["avg_reward"] < 0.3:
+                health["status"] = "degraded"
+
+            await self.ctx.redis.hset(key, skill_name, json.dumps(health, ensure_ascii=False))
+            await self.ctx.redis.expire(key, self.ctx.ttl_seconds * 6)  # longer TTL for analytics
+        except Exception as e:
+            logger.debug(f"Promoted skill usage tracking skipped: {e}")
+
+    async def _get_promoted_skill_health(self, skill_name: str = None) -> dict | list:
+        """Get health stats for one or all promoted skills."""
+        key = "promoted_skill_health"
+        try:
+            if skill_name:
+                raw = await self.ctx.redis.hget(key, skill_name)
+                return json.loads(raw) if raw else {}
+            raw = await self.ctx.redis.hgetall(key)
+            return [json.loads(v) for v in raw.values()]
+        except Exception:
+            return {} if skill_name else []
+
+    async def _check_skill_regression(self, skill_name: str) -> dict | None:
+        """Check if a promoted skill has regressed and should be flagged.
+
+        Returns a deprecation warning dict if the skill is degraded, else None.
+        """
+        health = await self._get_promoted_skill_health(skill_name)
+        if not health:
+            return None
+        status = health.get("status", "active")
+        if status == "degraded":
+            return {
+                "skill_name": skill_name,
+                "calls": health.get("calls", 0),
+                "success_rate": health.get("success_rate", 0),
+                "avg_reward": health.get("avg_reward", 0),
+                "suggestion": (
+                    f"Skill '{skill_name}' has degraded "
+                    f"(success_rate={health.get('success_rate', 0):.2f}, "
+                    f"avg_reward={health.get('avg_reward', 0):.2f}). "
+                    f"Consider reviewing or deprecating it."
+                ),
+            }
+        # Also flag abandoned skills (created > 7 days ago, never used since)
+        first_used = health.get("first_used", 0)
+        last_used = health.get("last_used", 0)
+        if first_used > 0 and (time.time() - last_used) > 7 * 86400:
+            return {
+                "skill_name": skill_name,
+                "calls": health.get("calls", 0),
+                "success_rate": health.get("success_rate", 0),
+                "suggestion": (
+                    f"Skill '{skill_name}' has not been used in 7+ days. "
+                    f"Consider archiving it."
+                ),
+            }
+        return None
+
+    # ── Periodic Health Check ──────────────────────────────────────────────
+
+    async def _run_skill_health_check(self):
+        """Periodic check: scan promoted skills for regression or abandonment.
+
+        Runs as part of the background thinker loop.
+        Broadcasts warnings for degraded/abandoned skills.
+        """
+        try:
+            all_health = await self._get_promoted_skill_health()
+            if not all_health:
+                return
+
+            warnings = []
+            for health in all_health:
+                skill_name = health.get("skill_name", "")
+                warning = await self._check_skill_regression(skill_name)
+                if warning:
+                    warnings.append(warning)
+
+            if warnings and self.broadcast_event:
+                await self.broadcast_event("skill_health_warning", {
+                    "warnings": warnings,
+                    "count": len(warnings),
+                })
+                for w in warnings:
+                    logger.info(f"Skill health warning: {w['suggestion']}")
+        except Exception as e:
+            logger.debug(f"Skill health check skipped: {e}")
+
+    # ── Pattern Strength & Proactive Promotion ─────────────────────────────
+
+    async def _compute_pattern_strength(self, pattern: dict) -> float:
+        """Score a task pattern's promotion-worthiness based on accumulated data.
+
+        Returns 0.0-1.0 where >0.7 means strong candidate for proactive promotion.
+        Factors: success rate, repetition count, tool chain stability, recency.
+        """
+        success_count = int(pattern.get("success_count", 0))
+        failure_count = int(pattern.get("failure_count", 0))
+        total = success_count + failure_count
+        if total < 2:
+            return 0.0
+
+        success_rate = success_count / total if total > 0 else 0
+        chain = pattern.get("successful_chain", [])
+        chain_len = len(chain) if isinstance(chain, list) else 0
+        last_seen = float(pattern.get("last_seen", 0))
+        now = time.time()
+
+        # Recency bonus: patterns seen in last 48h get boost
+        recency = max(0, 1.0 - (now - last_seen) / (48 * 3600)) if last_seen > 0 else 0
+
+        # Repetition bonus: more repetitions = more confidence
+        repetition = min(1.0, total / 10.0)
+
+        # Chain stability: longer chains that succeed consistently are valuable
+        stability = success_rate * min(1.0, chain_len / 5.0)
+
+        # Composite score
+        strength = (
+            0.35 * success_rate +
+            0.25 * repetition +
+            0.25 * stability +
+            0.15 * recency
+        )
+        return round(strength, 4)
+
+    async def _proactive_pattern_scan(self) -> list:
+        """Scan accumulated task patterns for strong promotion candidates.
+
+        Returns list of patterns with strength > 0.6 that haven't been promoted yet.
+        Called periodically or after pattern accumulation milestones.
+        """
+        try:
+            patterns = await self.ctx.get_task_patterns()
+        except Exception:
+            return []
+
+        # Get set of already-promoted skill names to avoid duplicates
+        promoted = set()
+        try:
+            health_data = await self._get_promoted_skill_health()
+            for h in health_data:
+                promoted.add(h.get("skill_name", ""))
+        except Exception:
+            pass
+
+        candidates = []
+        for pattern in patterns:
+            strength = await self._compute_pattern_strength(pattern)
+            if strength < 0.6:
+                continue
+            goal_type = pattern.get("goal_type", "")
+            chain = pattern.get("successful_chain", [])
+            # Check if already promoted
+            skill_name = self._normalize_generated_skill_name(
+                goal_type.replace(" ", "_"), "generated_workflow"
+            )
+            if skill_name in promoted:
+                continue
+            candidates.append({
+                "pattern": pattern,
+                "strength": strength,
+                "goal_type": goal_type,
+                "chain": chain,
+                "success_count": pattern.get("success_count", 0),
+                "failure_count": pattern.get("failure_count", 0),
+            })
+
+        candidates.sort(key=lambda c: c["strength"], reverse=True)
+        return candidates[:5]  # top 5
+
+    # ── Enhanced Promotion with Pattern Strength ───────────────────────────
+
+    async def _maybe_prompt_skill_creation_enhanced(self, task_trace: dict, session_id: str):
+        """Enhanced version: uses both LLM signal AND pattern strength data.
+
+        Two paths to trigger promotion:
+          A) LLM says should_create_skill + quality gate (original path)
+          B) Pattern accumulated enough success across sessions (proactive path)
+
+        Path B catches workflows the LLM might miss — e.g., tasks that
+        individually seem simple but collectively represent a pattern.
+        """
+        # ── Path A: LLM-triggered (existing flow) ──
+        try:
+            latest_hash = await self.ctx.redis.get(f"skill_promotion_latest:{session_id}")
+            if latest_hash:
+                raw = await self.ctx.redis.hget("skill_promotion_candidates", latest_hash)
+                if raw:
+                    candidate = json.loads(raw)
+                    goal_type = candidate.get("goal_type", "task")
+                    chain = candidate.get("successful_chain", [])
+                    tool_count = candidate.get("tool_count", 0)
+                    chain_display = " → ".join(chain[:5]) if chain else f"{tool_count} tool calls"
+
+                    prompt = (
+                        f"This task ('{goal_type}') used {tool_count} tool calls: {chain_display}. "
+                        f"Save this workflow as a reusable skill?"
+                    )
+                    confirmed = await self._request_user_confirmation(
+                        prompt=prompt, session_id=session_id,
+                    )
+                    if confirmed:
+                        await self._create_skill_from_pattern(candidate, session_id)
+                        await self.ctx.redis.hdel("skill_promotion_candidates", latest_hash)
+                        await self.ctx.redis.delete(f"skill_promotion_latest:{session_id}")
+                        return  # done, don't also do proactive path
+        except Exception as e:
+            logger.debug(f"LLM-triggered promotion check skipped: {e}")
+
+        # ── Path B: Pattern-strength proactive promotion ──
+        # Only check periodically (every ~10 task completions per session)
+        try:
+            counter_key = f"proactive_scan_counter:{session_id}"
+            count = int(await self.ctx.redis.get(counter_key) or "0") + 1
+            await self.ctx.redis.set(counter_key, str(count), ex=86400)
+
+            if count % 10 == 0:  # every 10th task
+                candidates = await self._proactive_pattern_scan()
+                for c in candidates[:2]:  # prompt at most 2 per scan
+                    chain_display = " → ".join(c["chain"][:5])
+                    prompt = (
+                        f"You've completed '{c['goal_type']}' successfully "
+                        f"{c['success_count']} times (strength={c['strength']:.2f}). "
+                        f"Tool chain: {chain_display}. "
+                        f"Save as a reusable skill?"
+                    )
+                    confirmed = await self._request_user_confirmation(
+                        prompt=prompt, session_id=session_id,
+                    )
+                    if confirmed:
+                        candidate_data = {
+                            "goal_type": c["goal_type"],
+                            "successful_chain": c["chain"],
+                            "preconditions": c["pattern"].get("preconditions", []),
+                            "notes": c["pattern"].get("notes", ""),
+                            "example_user_goals": c["pattern"].get("example_user_goals", []),
+                            "reward": 0.8,  # high confidence since it's pattern-based
+                            "tool_count": len(c["chain"]),
+                            "session_id": session_id,
+                            "created_at": time.time(),
+                        }
+                        await self._create_skill_from_pattern(candidate_data, session_id)
+        except Exception as e:
+            logger.debug(f"Proactive pattern scan skipped: {e}")
 
     @staticmethod
     def _normalize_dependency_spec(dep: str) -> str:
@@ -3672,6 +4234,112 @@ class YuanGeAgent:
         if router is not None:
             await router._learn_from_task_trace(trace)
 
+    async def _write_task_experience_hyperedge(self, task_trace: dict):
+        """Persist a task execution as a task_experience hyperedge in the ontology."""
+        try:
+            svc, pool = self._get_ontology_service_and_pool()
+            if svc is None or pool is None:
+                return
+            import json as _j
+            d = chr(36)  # dollar sign for asyncpg params
+            session_id = task_trace.get("session_id", "default")
+            user_goal = task_trace.get("user_goal", "")[:500]
+            skills = task_trace.get("selected_skills", []) or []
+            tool_calls = task_trace.get("tool_calls", []) or []
+            success = task_trace.get("success", False)
+            final_answer = (task_trace.get("final_answer") or "")[:5000]
+            started_at = task_trace.get("started_at", 0)
+
+            # Stable hyperedge ID
+            he_id = svc.ontology_node_id("hyperedge", f"task:{session_id}:{started_at}")
+
+            async with pool.acquire() as conn:
+                # Create request node (claim)
+                req_id = svc.ontology_node_id("claim", f"request:{session_id}:{started_at}")
+                await svc._upsert_ontology_node(conn, req_id, "claim",
+                    f"Request: {user_goal[:80]}", {
+                        "user_goal": user_goal,
+                        "session_id": session_id,
+                        "started_at": started_at,
+                    })
+
+                # Create project node
+                proj_id = svc.ontology_node_id("project", session_id)
+                await svc._upsert_ontology_node(conn, proj_id, "project",
+                    f"Session: {session_id}", {"session_id": session_id})
+
+                # Create artifact node for the answer
+                art_id = svc.ontology_node_id("artifact", f"answer:{session_id}:{started_at}")
+                await svc._upsert_ontology_node(conn, art_id, "artifact",
+                    f"Answer: {(final_answer or '')[:80]}", {
+                        "answer_preview": (final_answer or "")[:500],
+                        "success": success,
+                    })
+
+                # Create outcome node
+                outcome_label = "success" if success else "failure"
+                outcome_id = svc.ontology_node_id("claim", f"outcome:{session_id}:{started_at}")
+                await svc._upsert_ontology_node(conn, outcome_id, "claim",
+                    f"Outcome: {outcome_label}", {
+                        "outcome": outcome_label,
+                        "success": success,
+                    })
+
+                # Insert hyperedge
+                summary = {
+                    "user_goal": user_goal[:200],
+                    "skills": skills,
+                    "tools": [tc.get("tool", "") for tc in tool_calls],
+                    "success": success,
+                }
+                await conn.execute(
+                    "INSERT INTO memory_hyperedges (id, edge_type, label, summary, confidence, metadata, created_at, updated_at) VALUES ("
+                    + d + "1, " + d + "2, " + d + "3, " + d + "4, " + d + "5, " + d + "6::jsonb, NOW(), NOW())"
+                    + " ON CONFLICT (id) DO UPDATE SET summary = EXCLUDED.summary, metadata = EXCLUDED.metadata, updated_at = NOW()",
+                    he_id, "task_experience", f"Task: {user_goal[:80]}",
+                    _j.dumps(summary),
+                    1.0,
+                    _j.dumps({"session_id": session_id, "started_at": started_at, "ontology": "ontology-guided-hypergraph-memory.v2"}),
+                )
+
+                # Add hyperedge members
+                await svc._upsert_hyperedge_member(conn, he_id, req_id, "request", "claim", 1.0,
+                    {"role": "request", "text": user_goal[:200]})
+                await svc._upsert_hyperedge_member(conn, he_id, proj_id, "project", "project", 0.9,
+                    {"role": "project", "session_id": session_id})
+                await svc._upsert_hyperedge_member(conn, he_id, art_id, "artifact", "artifact", 1.0,
+                    {"role": "artifact"})
+                await svc._upsert_hyperedge_member(conn, he_id, outcome_id, "outcome", "claim", 1.0,
+                    {"role": "outcome", "success": success})
+
+                # Evidence member — link the request claim as evidence for audit trail
+                await svc._upsert_hyperedge_member(conn, he_id, req_id, "evidence", "claim", 0.9,
+                    {"role": "evidence", "source": "request_claim"})
+
+                # Skill members
+                for skill_name in skills:
+                    skill_id = svc.ontology_node_id("skill", skill_name)
+                    await svc._upsert_hyperedge_member(conn, he_id, skill_id, "skill", "skill", 0.95,
+                        {"role": "skill", "skill_name": skill_name})
+
+                # Tool members
+                for tc in tool_calls:
+                    tool_name = tc.get("tool", "unknown")
+                    tool_id = svc.ontology_node_id("tool", tool_name)
+                    await svc._upsert_hyperedge_member(conn, he_id, tool_id, "tool", "tool", 0.9,
+                        {"role": "tool", "tool_name": tool_name, "duration_ms": tc.get("duration_ms", 0)})
+
+                # Pairwise links for fast traversal
+                sql_link = ("INSERT INTO memory_links (source_id, target_id, relation, confidence, metadata, created_at) VALUES ("
+                            + d + "1, " + d + "2, " + d + "3, " + d + "4, " + d + "5::jsonb, NOW())"
+                            + " ON CONFLICT (source_id, target_id, relation) DO NOTHING")
+                await conn.execute(sql_link, proj_id, he_id, "related", 1.0,
+                    _j.dumps({"edge_type": "task_experience"}))
+                await conn.execute(sql_link, he_id, art_id, "produces", 1.0,
+                    _j.dumps({"success": success}))
+        except Exception:
+            pass  # ontology write must never block task completion
+
     async def _collect_feedback(self, task_trace: dict, session_id: str, user_input: str):
         """Collect implicit user feedback after each chat turn."""
         try:
@@ -3848,6 +4516,8 @@ class YuanGeAgent:
             task_trace["metadata"]["answer_source"] = source
             await self.ctx.add_history(session_id, "assistant", ans)
             await self._learn_from_task_trace(task_trace)
+            await self._write_task_experience_hyperedge(task_trace)
+            await self._maybe_prompt_skill_creation_enhanced(task_trace, session_id)
             await self._collect_feedback(task_trace, session_id, user_input)
             if self._trajectory_collector:
                 await self._trajectory_collector.collect(task_trace)
@@ -4133,7 +4803,7 @@ class YuanGeAgent:
                                         )
                                         task_trace["success"] = False
                                         task_trace["final_answer"] = error_answer
-                                        await self._learn_from_task_trace(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
+                                        await self._learn_from_task_trace(task_trace); await self._write_task_experience_hyperedge(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
                                         if self._trajectory_collector:
                                             await self._trajectory_collector.collect(task_trace)
                                         return error_answer
@@ -4172,7 +4842,7 @@ class YuanGeAgent:
                 task_trace["success"] = bool(task_trace.get("tool_calls"))
                 task_trace["final_answer"] = ans
                 await self.ctx.add_history(session_id, "assistant", ans)
-                await self._learn_from_task_trace(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
+                await self._learn_from_task_trace(task_trace); await self._write_task_experience_hyperedge(task_trace); await self._maybe_prompt_skill_creation(task_trace, session_id); await self._collect_feedback(task_trace, session_id, user_input)
                 if self._trajectory_collector:
                     await self._trajectory_collector.collect(task_trace)
                 await self.dehydrator.process(session_id, f"User: {user_input}\nConsensus: {ans}")
@@ -4191,7 +4861,7 @@ class YuanGeAgent:
         timeout_answer = "Task took too long."
         task_trace["success"] = False
         task_trace["final_answer"] = timeout_answer
-        await self._learn_from_task_trace(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
+        await self._learn_from_task_trace(task_trace); await self._write_task_experience_hyperedge(task_trace); await self._collect_feedback(task_trace, session_id, user_input)
         if self._trajectory_collector:
             await self._trajectory_collector.collect(task_trace)
         # ── Blackboard: mark current step failed on timeout ──
@@ -4208,6 +4878,9 @@ class YuanGeAgent:
 
 if FASTAPI_AVAILABLE:
     from integrations.feishu_bot import FeishuBotAdapter, FeishuConfig
+    from integrations.wecom_bot import WecomBotAdapter, WecomConfig
+    from integrations.telegram_bot import TelegramBotAdapter, TelegramConfig
+    from integrations.qq_bot import QQBotAdapter, QQBotConfig
 
     class ChannelAdapter:
         name = "base"
@@ -4250,18 +4923,31 @@ if FASTAPI_AVAILABLE:
             self.adapters = {
                 "webhook": WebhookChannelAdapter(),
                 "feishu": FeishuBotAdapter(FeishuConfig.from_config(config), logger),
+                "wecom": WecomBotAdapter(WecomConfig.from_config(config), logger),
+                "telegram": TelegramBotAdapter(TelegramConfig.from_config(config), logger),
             }
             self.app = FastAPI(title="Agent IM Gateway", lifespan=self.lifespan_handler)
             origins = self.gateway_cfg.get("allowed_origins", ["*"])
             self.app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
             self.app.post("/webhook")(self.handle_webhook)
             self.app.post("/integrations/feishu/events")(self.handle_feishu_events)
+            self.app.post("/integrations/wecom/events")(self.handle_wecom_events)
+            self.app.post("/integrations/telegram/webhook/{secret}")(self.handle_telegram_events)
 
         @asynccontextmanager
         async def lifespan_handler(self, app: FastAPI):
             self.agent = await self.agent_factory()
             logger.info("Gateway and Agent Initialized.")
+            # Start QQ WebSocket connection
+            qq_adapter = self.adapters.get("qq")
+            if qq_adapter:
+                await qq_adapter.start(self.agent)
+                logger.info("QQ bot WebSocket started.")
             yield
+            # Stop QQ WebSocket connection
+            if qq_adapter:
+                await qq_adapter.stop()
+                logger.info("QQ bot WebSocket stopped.")
             if self.agent:
                 await self.agent.close()
                 logger.info("Gateway and Agent Shutdown safely.")
@@ -4277,6 +4963,20 @@ if FASTAPI_AVAILABLE:
 
         async def handle_feishu_events(self, request: Request, background_tasks: BackgroundTasks):
             adapter = self.adapters["feishu"]
+            return await adapter.handle_callback(request, self.agent, background_tasks)
+
+        async def handle_wecom_events(self, request: Request, background_tasks: BackgroundTasks):
+            adapter = self.adapters["wecom"]
+            return await adapter.handle_callback(request, self.agent, background_tasks)
+
+        async def handle_telegram_events(self, request: Request, background_tasks: BackgroundTasks,
+                                          secret: str = ""):
+            adapter = self.adapters["telegram"]
+            expected_secret = adapter.config.webhook_secret or hashlib.sha256(
+                adapter.config.bot_token.encode()
+            ).hexdigest()[:16]
+            if secret != expected_secret:
+                return {"status": "error", "message": "invalid webhook secret"}
             return await adapter.handle_callback(request, self.agent, background_tasks)
 
         async def process_and_reply(self, adapter: ChannelAdapter, message: dict):
@@ -4376,6 +5076,25 @@ if FASTAPI_AVAILABLE:
                     await ws.send_text(message)
                 except Exception:
                     self.active_ws_connections.discard(ws)
+
+        def _agent_not_ready_payload(self, lang: str = "en") -> dict:
+            raw_error = self.agent_startup_error or "startup failed"
+            lower = raw_error.lower()
+            missing_key = "missing credentials" in lower or "api_key" in lower or "openai_api_key" in lower
+            if missing_key:
+                answer = (
+                    "当前模型厂商还没有配置 API Key。请运行 `start.bat` 并按启动向导选择模型厂商，"
+                    "或在 `pysrc/model.toml` 中填写对应 provider 的 `api_key`。"
+                    if lang == "zh"
+                    else "The selected model provider does not have an API key yet. Run `start.bat` and use the startup setup prompt, "
+                    "or add the provider `api_key` in `pysrc/model.toml`."
+                )
+                return {"answer": answer, "executed_tools": [], "status": "missing_provider_key"}
+            return {
+                "answer": f"Backend is running, but the agent is not ready: {raw_error}",
+                "executed_tools": [],
+                "status": "degraded",
+            }
 
         def _write_runtime_files(self):
             runtime_dir = BASE_DIR.parent / ".runtime"
@@ -5283,11 +6002,7 @@ if FASTAPI_AVAILABLE:
         async def chat_endpoint(self, request: Request):
             data = await request.json()
             if not self.agent:
-                return {
-                    "answer": f"Backend is running, but the agent is not ready: {self.agent_startup_error or 'startup failed'}",
-                    "executed_tools": [],
-                    "status": "degraded",
-                }
+                return self._agent_not_ready_payload(str(data.get("lang") or "en"))
             session_id = str(data.get("session_id") or "default")
             room_id = str(data.get("room_id") or "").strip()
             user_id = str(data.get("user_id") or "shared").strip() or "shared"

@@ -118,3 +118,32 @@ user = "neo4j"
 password = "root"
 http_port = 7474
 bolt_port = 7687
+
+# ── IM Integrations ───────────────────────────────────────────────────
+
+[integrations.feishu]
+app_id = ""
+app_secret = ""
+verification_token = ""
+encrypt_key = ""
+api_base = "https://open.feishu.cn"
+reply_enabled = true
+lang = "zh"
+
+[integrations.wecom]
+corp_id = ""
+corp_secret = ""
+token = ""
+encoding_aes_key = ""
+agent_id = ""
+api_base = "https://qyapi.weixin.qq.com"
+reply_enabled = true
+
+[integrations.qq]
+app_id = ""
+app_secret = ""
+bot_app_id = ""
+api_base = "https://api.sgroup.qq.com"
+gateway_url = "wss://api.sgroup.qq.com/websocket"
+reply_enabled = true
+lang = "zh"

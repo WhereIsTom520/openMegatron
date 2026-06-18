@@ -1098,6 +1098,15 @@ class SkillRouter:
                 successful_chain.append(name)
         if not successful_chain:
             return
+
+        # ── Track promoted (generated) skill usage for lifecycle management ──
+        for name in successful_chain:
+            if name.startswith("generated/"):
+                try:
+                    await self._agent._record_promoted_skill_usage(name, trace)
+                except Exception:
+                    pass
+
         compact_trace = {
             "user_goal": trace.get("user_goal"),
             "success": bool(trace.get("success")),
@@ -1151,6 +1160,53 @@ class SkillRouter:
             await self.ctx.record_task_pattern(pattern)
         except Exception:
             pass
+
+        # ── Skill promotion candidate: if LLM recommends creating a skill ──
+        should_create = bool(pattern.get("should_create_skill", False))
+        reward = float(reward_profile.get("reward", 0))
+        tool_count = len(trace.get("tool_calls", []))
+        if should_create and reward > 0.5 and tool_count >= 2:
+            try:
+                session_id = str(trace.get("session_id", "default"))
+                candidate = {
+                    "goal_type": pattern.get("goal_type", "general_task"),
+                    "successful_chain": pattern.get("successful_chain", []),
+                    "preconditions": pattern.get("preconditions", []),
+                    "notes": pattern.get("notes", ""),
+                    "example_user_goals": pattern.get("example_user_goals", []),
+                    "reward": reward,
+                    "tool_count": tool_count,
+                    "session_id": session_id,
+                    "created_at": time.time(),
+                }
+                # Deduplicate: only store one candidate per goal_type per session (24h TTL)
+                import hashlib
+                goal_hash = hashlib.sha256(
+                    (pattern.get("goal_type", "general_task") + session_id).encode()
+                ).hexdigest()[:12]
+                await self.ctx.redis.hset(
+                    "skill_promotion_candidates", goal_hash,
+                    json.dumps(candidate, ensure_ascii=False)
+                )
+                await self.ctx.redis.expire("skill_promotion_candidates", 86400)
+                # Set a per-session pointer so the agent can find it quickly
+                await self.ctx.redis.set(
+                    f"skill_promotion_latest:{session_id}", goal_hash, ex=86400
+                )
+                if self.broadcast_event:
+                    await self.broadcast_event("skill_promotion_candidate", {
+                        "session_id": session_id,
+                        "goal_type": pattern.get("goal_type"),
+                        "chain": pattern.get("successful_chain", []),
+                        "tool_count": tool_count,
+                        "reward": reward,
+                    })
+                logger.info(
+                    f"Skill promotion candidate stored: {pattern.get('goal_type')} "
+                    f"(reward={reward:.2f}, tools={tool_count})"
+                )
+            except Exception as e:
+                logger.debug(f"Failed to store skill promotion candidate: {e}")
         try:
             workflow_id = await self.memory_engine.add_workflow_pattern(pattern)
             pattern["workflow_pattern_id"] = workflow_id
