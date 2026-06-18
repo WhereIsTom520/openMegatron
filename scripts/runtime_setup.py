@@ -678,7 +678,7 @@ def main() -> int:
     backend_port = None
     if args.mode == "API":
         preferred = int(os.environ.get("MEGATRON_BACKEND_PORT", "8000"))
-        backend_port = find_bindable_port(preferred)
+        backend_port = find_bindable_port(preferred, reserved=set(ports.values()))
         if backend_port != preferred:
             print(f"[WARN] Backend port {preferred} is unavailable; using {backend_port}.")
         else:

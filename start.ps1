@@ -167,8 +167,24 @@ function Ensure-Venv {
 function Invoke-WithLog {
     param([string]$File, [string[]]$Arguments, [string]$Label)
     Add-Log "RUN $File $($Arguments -join ' ')"
-    & $File @Arguments 2>&1 | Tee-Object -FilePath $StartupLog -Append
-    if ($LASTEXITCODE -ne 0) {
+    $safeLabel = ($Label -replace '[^A-Za-z0-9_.-]', '_')
+    $stdoutLog = Join-Path $RuntimeDir "$safeLabel.stdout.log"
+    $stderrLog = Join-Path $RuntimeDir "$safeLabel.stderr.log"
+    Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+
+    try {
+        $proc = Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+        foreach ($path in @($stdoutLog, $stderrLog)) {
+            if (Test-Path $path) {
+                Get-Content $path -ErrorAction SilentlyContinue | Tee-Object -FilePath $StartupLog -Append
+            }
+        }
+        $exitCode = $proc.ExitCode
+    } finally {
+        Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+    }
+    if ($exitCode -ne 0) {
         throw "$Label failed. See $StartupLog"
     }
 }

@@ -6018,6 +6018,23 @@ if FASTAPI_AVAILABLE:
             provider = data.get("provider")
             model = data.get("model")
             lang = data.get("lang", "en")
+            if not provider:
+                provider_id = str(
+                    getattr(self.agent, "llm_provider", None)
+                    or self.config.get("llm_provider", "openai")
+                    or "openai"
+                ).strip().lower()
+                provider_cfg = (self.config.get("llm_providers", {}) or {}).get(provider_id)
+                if not provider_cfg or not str(provider_cfg.get("api_key") or "").strip():
+                    env_hint = "OPENAI_API_KEY" if provider_id == "openai" else f"{provider_id.upper()}_API_KEY"
+                    return {
+                        "answer": (
+                            f"Provider '{provider_id}' is not configured. Add its API key in pysrc/model.toml "
+                            f"or set {env_hint}, then restart start.bat."
+                        ),
+                        "executed_tools": [],
+                        "status": "missing_provider_key",
+                    }
             if provider:
                 provider_id = str(provider).strip().lower()
                 provider_cfg = (self.config.get("llm_providers", {}) or {}).get(provider_id)
