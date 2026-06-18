@@ -189,6 +189,25 @@ function Invoke-WithLog {
     }
 }
 
+function Invoke-VisibleWithLog {
+    param([string]$File, [string[]]$Arguments, [string]$Label)
+    Add-Log "RUN $File $($Arguments -join ' ')"
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $File @Arguments 2>&1 | ForEach-Object {
+            Write-Host $_
+            Add-Content -Path $StartupLog -Encoding UTF8 -Value $_
+        }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$Label failed. See $StartupLog"
+    }
+}
+
 function Ensure-PythonDeps {
     param([string]$Python)
     Write-Info 'Checking Python packages'
@@ -203,10 +222,10 @@ function Ensure-PythonDeps {
     if ($Reinstall -or $hash -ne $oldHash) {
         Write-Info 'Installing Python packages. This can take a few minutes.'
         try {
-            Invoke-WithLog -File $Python -Arguments @('-m', 'pip', 'install', '-r', $requirements) -Label 'pip install'
+            Invoke-VisibleWithLog -File $Python -Arguments @('-m', 'pip', 'install', '-r', $requirements) -Label 'pip install'
         } catch {
             Write-Warn 'Default pip install failed, retrying with Tsinghua mirror'
-            Invoke-WithLog -File $Python -Arguments @('-m', 'pip', 'install', '-r', $requirements, '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple') -Label 'pip install mirror'
+            Invoke-VisibleWithLog -File $Python -Arguments @('-m', 'pip', 'install', '-r', $requirements, '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple') -Label 'pip install mirror'
         }
         Set-Content -Path $hashFile -Encoding ASCII -NoNewline -Value $hash
     }
@@ -262,10 +281,39 @@ function Ensure-Config {
     if (-not (Test-Path $modelToml)) {
         if (-not (Test-Path $example)) { throw 'Missing pysrc\model.example.toml' }
         Copy-Item $example $modelToml
-        Write-Warn 'Created pysrc\model.toml from template. Add real API keys before using cloud models.'
+        Write-Warn 'Created pysrc\model.toml from template. The next step will configure a model provider.'
     } else {
         Write-Ok 'model.toml exists'
     }
+}
+
+function Ensure-LlmConfig {
+    param([string]$Python)
+    Write-Info 'Checking model provider'
+    $modelToml = Join-Path $ScriptRoot 'pysrc\model.toml'
+    $setupScript = Join-Path $ScriptRoot 'scripts\llm_setup.py'
+    $llmEnv = Join-Path $RuntimeDir 'llm_env.cmd'
+    if (-not (Test-Path $setupScript)) {
+        Write-Warn 'Model setup helper is missing; continuing with current config'
+        return
+    }
+    if ((Test-Path $llmEnv) -and $env:MEGATRON_FORCE_LLM_SETUP -ne '1') {
+        Write-Ok 'Model provider setup already exists'
+        return
+    }
+
+    $args = @($setupScript, '--toml', $modelToml, '--env-cmd', $llmEnv, '--lang', 'en')
+    if ($NoBrowser -or $env:MEGATRON_USE_HOLO -eq '1') {
+        $args += '--use-holo'
+        Invoke-WithLog -File $Python -Arguments $args -Label 'llm setup'
+    } else {
+        Add-Log "RUN $Python $($args -join ' ')"
+        & $Python @args
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Model provider setup failed'
+        }
+    }
+    Write-Ok 'Model provider is ready'
 }
 
 function Get-DockerCommand {
@@ -366,11 +414,12 @@ function Ensure-DockerRuntime {
 }
 
 function Load-RuntimeEnv {
-    $envFile = Join-Path $RuntimeDir 'runtime_env.cmd'
-    if (-not (Test-Path $envFile)) { return }
-    foreach ($line in Get-Content $envFile) {
-        if ($line -match '^set "([^=]+)=(.*)"$') {
-            [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+    foreach ($envFile in @((Join-Path $RuntimeDir 'runtime_env.cmd'), (Join-Path $RuntimeDir 'llm_env.cmd'))) {
+        if (-not (Test-Path $envFile)) { continue }
+        foreach ($line in Get-Content $envFile) {
+            if ($line -match '^set "([^=]+)=(.*)"$') {
+                [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+            }
         }
     }
 }
@@ -472,6 +521,7 @@ function Install-All {
     $npm = Get-Npm
     Ensure-NodeDeps -Npm $npm
     Ensure-Config
+    Ensure-LlmConfig -Python $python
     Write-Ok 'Install/update complete'
 }
 
@@ -483,6 +533,7 @@ function Start-All {
     $npm = Get-Npm
     Ensure-NodeDeps -Npm $npm
     Ensure-Config
+    Ensure-LlmConfig -Python $python
     Ensure-DockerRuntime -Python $python
 
     $bp = Read-PortFile 'backend' 8000

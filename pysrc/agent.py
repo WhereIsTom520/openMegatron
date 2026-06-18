@@ -113,6 +113,12 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 AUTO_CONFIRM = os.environ.get("AUTO_CONFIRM", "0").lower() in ("1", "true", "yes")
 
 DEFAULT_LLM_PROVIDERS = {
+    "holo": {
+        "label": "Holo Local",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "model": "holo-local",
+        "models": ["holo-local"],
+    },
     "openai": {
         "label": "OpenAI",
         "base_url": "https://api.openai.com/v1",
@@ -226,8 +232,8 @@ def load_config(config_path: str = "model.toml") -> dict:
             "extra_params": file_config.get("extra_params", {}),
         }
     if active_provider not in provider_configs:
-        active_provider = "openai"
-    provider_config = provider_configs.get(active_provider, provider_configs["openai"])
+        active_provider = "holo"
+    provider_config = provider_configs.get(active_provider, provider_configs["holo"])
     api_key = provider_config.get("api_key", "")
     base_url = provider_config.get("base_url")
     model = provider_config.get("model", "gpt-4o-mini")
@@ -1112,11 +1118,11 @@ class YuanGeAgent:
             return None
 
     def configure_llm(self, provider: str = None, model: str = None):
-        provider_id = str(provider or self.llm_provider or self.config.get("llm_provider", "openai")).strip().lower()
+        provider_id = str(provider or self.llm_provider or self.config.get("llm_provider", "holo")).strip().lower()
         providers = self.config.get("llm_providers", {}) or {}
         provider_cfg = providers.get(provider_id)
         if not provider_cfg:
-            provider_id = self.config.get("llm_provider", "openai")
+            provider_id = self.config.get("llm_provider", "holo")
             provider_cfg = providers.get(provider_id) or self.config.get("llm", {})
         selected_model = str(model or provider_cfg.get("model") or self.model or "gpt-4o-mini").strip()
         api_key = str(provider_cfg.get("api_key") or "").strip()
@@ -6018,14 +6024,26 @@ if FASTAPI_AVAILABLE:
             provider = data.get("provider")
             model = data.get("model")
             lang = data.get("lang", "en")
+            def holo_local_payload() -> dict:
+                return {
+                    "answer": (
+                        "Holo local mode is active. OpenMegatron started successfully and the local workbench is usable. "
+                        "Configure a cloud provider in the startup wizard, or point [llm.holo].base_url at a local "
+                        "OpenAI-compatible server such as llama.cpp/Ollama/vLLM for full model replies."
+                    ),
+                    "executed_tools": [],
+                    "status": "holo_local",
+                }
             if not provider:
                 provider_id = str(
                     getattr(self.agent, "llm_provider", None)
-                    or self.config.get("llm_provider", "openai")
-                    or "openai"
+                    or self.config.get("llm_provider", "holo")
+                    or "holo"
                 ).strip().lower()
                 provider_cfg = (self.config.get("llm_providers", {}) or {}).get(provider_id)
                 if not provider_cfg or not str(provider_cfg.get("api_key") or "").strip():
+                    if provider_id == "holo":
+                        return holo_local_payload()
                     env_hint = "OPENAI_API_KEY" if provider_id == "openai" else f"{provider_id.upper()}_API_KEY"
                     return {
                         "answer": (
@@ -6039,6 +6057,8 @@ if FASTAPI_AVAILABLE:
                 provider_id = str(provider).strip().lower()
                 provider_cfg = (self.config.get("llm_providers", {}) or {}).get(provider_id)
                 if not provider_cfg or not provider_cfg.get("api_key"):
+                    if provider_id == "holo":
+                        return holo_local_payload()
                     provider_label = (provider_cfg or {}).get("label") or provider_id
                     if lang == "zh":
                         missing_key_message = (

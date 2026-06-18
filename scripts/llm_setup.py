@@ -15,6 +15,13 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 PROVIDERS = {
+    "0": {
+        "id": "holo",
+        "label": "Holo Local",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "model": "holo-local",
+        "models": ["holo-local"],
+    },
     "1": {
         "id": "openai",
         "label": "OpenAI",
@@ -82,6 +89,7 @@ PROVIDERS = {
 
 
 ZH_PROVIDER_NAMES = {
+    "0": "Holo Local (no API key)",
     "1": "OpenAI",
     "2": "DeepSeek",
     "3": "通义千问 / Qwen",
@@ -121,6 +129,41 @@ def write_env_cmd(path: Path, api_key: str, base_url: str, model: str) -> None:
         f'set "OPENAI_MODEL={model}"',
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_holo_env_cmd(path: Path, base_url: str, model: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "@echo off",
+        'set "MEGATRON_LLM_PROVIDER=holo"',
+        f'set "MEGATRON_HOLO_BASE_URL={base_url}"',
+        f'set "MEGATRON_HOLO_MODEL={model}"',
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def configure_holo(data: dict, toml_path: Path, env_cmd_path: Path, lang: str) -> None:
+    llm = data.setdefault("llm", {})
+    provider = PROVIDERS["0"]
+    provider_cfg = llm.setdefault("holo", {})
+    llm["active_provider"] = "holo"
+    provider_cfg["label"] = provider["label"]
+    provider_cfg["api_key"] = ""
+    provider_cfg["base_url"] = provider["base_url"]
+    provider_cfg["model"] = provider["model"]
+    provider_cfg["models"] = provider["models"]
+    provider_cfg["local_mode"] = True
+    provider_cfg.setdefault("extra_params", {})
+
+    toml_path.parent.mkdir(parents=True, exist_ok=True)
+    with toml_path.open("wb") as file:
+        tomli_w.dump(data, file)
+    write_holo_env_cmd(env_cmd_path, provider["base_url"], provider["model"])
+    print(i18n(
+        lang,
+        "[OK] Holo Local 已启用：无需 API Key，可先进入本地工作台；接入本地 OpenAI-compatible 服务后即可获得完整模型回复。",
+        "[OK] Holo Local enabled: no API key required. The workbench can start now; point it at a local OpenAI-compatible server for full model replies.",
+    ))
 
 
 def ask(prompt: str) -> str:
@@ -266,7 +309,7 @@ def prompt_provider(lang: str) -> dict:
         print("Select model provider:")
         for choice, provider in PROVIDERS.items():
             print(f"  {choice}. {provider['label']}")
-        choice = ask("Enter option (1-9, default 1): ") or "1"
+        choice = ask("Enter option (0-9, default 0 = Holo Local): ") or "0"
     return PROVIDERS.get(choice)
 
 
@@ -275,6 +318,7 @@ def main() -> int:
     parser.add_argument("--toml", required=True)
     parser.add_argument("--lang", choices=["zh", "en"], default="en")
     parser.add_argument("--env-cmd", required=True)
+    parser.add_argument("--use-holo", action="store_true", help="Enable Holo Local without prompting for an API key.")
     args = parser.parse_args()
 
     lang = args.lang
@@ -284,6 +328,10 @@ def main() -> int:
     llm = data.setdefault("llm", {})
     active_provider = str(llm.get("active_provider") or "openai")
     force_setup = os.environ.get("MEGATRON_FORCE_LLM_SETUP") == "1"
+
+    if args.use_holo:
+        configure_holo(data, toml_path, env_cmd_path, lang)
+        return 0
 
     active_api_key = (
         os.environ.get(env_name(active_provider, "API_KEY"))
@@ -320,6 +368,10 @@ def main() -> int:
         print("[ERROR] Invalid provider option." if lang != "zh" else "[错误] 无效的厂商选项。")
         return 1
 
+    if provider["id"] == "holo":
+        configure_holo(data, toml_path, env_cmd_path, lang)
+        return 0
+
     if lang == "zh":
         print(f"当前厂商：{provider['label']}")
         api_key = ask(f"请输入 {provider['label']} API 密钥：")
@@ -327,8 +379,9 @@ def main() -> int:
         print(f"Provider: {provider['label']}")
         api_key = ask(f"Enter {provider['label']} API key: ")
     if not api_key:
-        print("[ERROR] Missing API key." if lang != "zh" else "[错误] 缺少 API 密钥。")
-        return 1
+        print(i18n(lang, "[WARN] 未输入 API Key，已切换到 Holo Local。", "[WARN] No API key entered; switching to Holo Local."))
+        configure_holo(data, toml_path, env_cmd_path, lang)
+        return 0
 
     if lang == "zh":
         base_url = ask(f"接口地址（默认 {provider['base_url']}）：") or provider["base_url"]

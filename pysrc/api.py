@@ -449,7 +449,7 @@ async def rag_status_endpoint(self, request: Request):
                 "models": [{"id": str(model), "name": str(model)} for model in models if model],
             })
         return {
-            "active_provider": getattr(self.agent, "llm_provider", None) or self.config.get("llm_provider", "openai"),
+            "active_provider": getattr(self.agent, "llm_provider", None) or self.config.get("llm_provider", "holo"),
             "active_model": getattr(self.agent, "model", None) or self.config.get("llm", {}).get("model", "gpt-4o-mini"),
             "providers": providers,
         }
@@ -1302,10 +1302,31 @@ async def rag_status_endpoint(self, request: Request):
         provider = data.get("provider")
         model = data.get("model")
         lang = data.get("lang", "en")
+        def holo_local_payload() -> dict:
+            return {
+                "answer": (
+                    "Holo local mode is active. OpenMegatron started successfully and the local workbench is usable. "
+                    "Configure a cloud provider in the startup wizard, or point [llm.holo].base_url at a local "
+                    "OpenAI-compatible server such as llama.cpp/Ollama/vLLM for full model replies."
+                ),
+                "executed_tools": [],
+                "status": "holo_local",
+            }
+        if not provider:
+            provider_id = str(
+                getattr(self.agent, "llm_provider", None)
+                or self.config.get("llm_provider", "holo")
+                or "holo"
+            ).strip().lower()
+            provider_cfg = (self.config.get("llm_providers", {}) or {}).get(provider_id)
+            if provider_id == "holo" and (not provider_cfg or not str(provider_cfg.get("api_key") or "").strip()):
+                return holo_local_payload()
         if provider:
             provider_id = str(provider).strip().lower()
             provider_cfg = (self.config.get("llm_providers", {}) or {}).get(provider_id)
             if not provider_cfg or not provider_cfg.get("api_key"):
+                if provider_id == "holo":
+                    return holo_local_payload()
                 provider_label = (provider_cfg or {}).get("label") or provider_id
                 if lang == "zh":
                     missing_key_message = (

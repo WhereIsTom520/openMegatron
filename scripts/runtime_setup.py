@@ -402,6 +402,23 @@ def choose_service_ports(docker_cmd: list[str], data: dict, blocked_ports: set[i
     return ports
 
 
+def service_ports_are_mapped(docker_cmd: list[str], ports: dict[str, int]) -> bool:
+    for name, spec in SERVICES.items():
+        mapped = docker_port(docker_cmd, spec["container"], spec["container_port"])
+        if not mapped or int(mapped) != int(ports.get(name, 0)):
+            return False
+    return True
+
+
+def start_existing_service_containers(docker_cmd: list[str]) -> None:
+    for container in sorted({spec["container"] for spec in SERVICES.values()}):
+        if container_exists(docker_cmd, container):
+            result = run(docker_cmd + ["start", container], timeout=30)
+            if result.returncode != 0:
+                raise RuntimeError(f"Could not start existing container {container}.")
+            print(f"[OK] Reusing existing container: {container}")
+
+
 def allocated_ports_from_compose_error(text: str) -> set[int]:
     ports: set[int] = set()
     for match in re.finditer(r"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):(\d+)", text or ""):
@@ -411,11 +428,11 @@ def allocated_ports_from_compose_error(text: str) -> set[int]:
     return ports
 
 
-def compose_up_with_retry(compose: list[str], docker_cmd: list[str], toml_path: Path, data: dict, runtime_dir: Path, ports: dict[str, int]) -> dict[str, int]:
+def compose_up_with_retry(compose: list[str], docker_cmd: list[str], compose_file: Path, toml_path: Path, data: dict, runtime_dir: Path, ports: dict[str, int]) -> dict[str, int]:
     blocked_ports: set[int] = set()
     for attempt in range(1, 3):
         print("[INFO] Starting local database containers...")
-        result = run(compose + ["-f", "docker-compose.yml", "up", "-d"], timeout=180)
+        result = run(compose + ["-f", str(compose_file), "up", "-d"], timeout=180)
         if result.stdout.strip():
             print(result.stdout.strip())
         if result.stderr.strip():
@@ -433,7 +450,7 @@ def compose_up_with_retry(compose: list[str], docker_cmd: list[str], toml_path: 
                 remove_container(docker_cmd, spec["container"])
         ports = choose_service_ports(docker_cmd, data, blocked_ports=blocked_ports)
         update_model_toml(toml_path, data, ports)
-        write_compose(Path("docker-compose.yml"), ports)
+        write_compose(compose_file, ports)
     raise RuntimeError("Docker Compose failed to start local services.")
 
 
@@ -661,15 +678,24 @@ def main() -> int:
     print("[1/4] Checking ports...")
     ports = choose_service_ports(docker_cmd, data)
     update_model_toml(toml_path, data, ports)
-    write_compose(Path("docker-compose.yml"), ports)
+    compose_file = runtime_dir / "docker-compose.generated.yml"
+    write_compose(compose_file, ports)
 
-    print()
-    print("[2/4] Prefetching Docker images...")
-    prefetch_images(docker_cmd)
+    if service_ports_are_mapped(docker_cmd, ports):
+        print()
+        print("[2/4] Reusing existing Docker containers...")
+        start_existing_service_containers(docker_cmd)
+        print()
+        print("[3/4] Starting containers...")
+        print("[OK] Existing containers are already mapped; Docker Compose is not required.")
+    else:
+        print()
+        print("[2/4] Prefetching Docker images...")
+        prefetch_images(docker_cmd)
 
-    print()
-    print("[3/4] Starting containers...")
-    ports = compose_up_with_retry(compose, docker_cmd, toml_path, data, runtime_dir, ports)
+        print()
+        print("[3/4] Starting containers...")
+        ports = compose_up_with_retry(compose, docker_cmd, compose_file, toml_path, data, runtime_dir, ports)
 
     print()
     print("[4/4] Waiting for database health...")

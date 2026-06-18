@@ -1,5 +1,15 @@
 [llm]
-active_provider = "openai"
+active_provider = "holo"
+
+[llm.holo]
+label = "Holo Local"
+api_key = ""
+base_url = "http://127.0.0.1:1234/v1"
+model = "holo-local"
+models = ["holo-local"]
+local_mode = true
+
+[llm.holo.extra_params]
 
 [llm.openai]
 label = "OpenAI"
