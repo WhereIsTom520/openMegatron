@@ -1,10 +1,20 @@
 # OpenMegatron
 
-OpenMegatron is an independent local research platform for agent trajectory analysis, hybrid memory, tool-use evaluation, retrieval-enhanced knowledge work, and trajectory-driven companion-model learning.
+**Latest version: 1.2.0**
 
-The project is designed for researchers, builders, and product teams who need to inspect how agent systems use tools, remember context, retrieve knowledge, and improve from task traces under local control.
+OpenMegatron is a local-first AI agent workbench for long-running agent research, skill routing, hybrid memory, tool-use evaluation, browser/GUI automation, and trajectory-driven companion-model learning.
+
+It is designed for researchers and builders who need to inspect how an agent uses tools, remembers context, retrieves knowledge, promotes reusable skills, and learns from execution traces under local control.
 
 [English](README.md) | [Chinese](README_CN.md)
+
+## What's New In 1.2.0
+
+- **Skill lifecycle governance**: saved, promoted, and workflow-derived skills can now carry a `skill_contract.json` describing permissions, risk level, schemas, and promotion gates.
+- **Skill health scoring**: historical trajectories are summarized into per-skill success rate, safety signal rate, regression rate, confirmation burden, latency, and health status.
+- **Replay verification gate**: `/skills/replay_verify` checks whether a skill has enough successful historical runs before it should be trusted for automatic reuse.
+- **Safer release workflow**: `scripts/scrub_config.py` creates a redacted TOML copy before sharing support logs, examples, or release archives.
+- **README refresh**: startup, credential handling, lifecycle APIs, and common commands are documented for the 1.2.0 workflow.
 
 ## Quick Start
 
@@ -18,9 +28,28 @@ Clone or download the repository, then open the `openMegatron` folder.
 
 ### 2. Configure Credentials Safely
 
-Use local environment variables or a non-tracked `.env` file for private credentials. `pysrc/model.toml` should store only non-sensitive routing and endpoint settings.
+Private credentials should stay local. The tracked repository should only contain examples and redacted files.
 
-Do not commit API keys, private tokens, local runtime state, logs, or machine-specific paths.
+Recommended options:
+
+- Put provider keys in local environment variables such as `OPENAI_API_KEY`.
+- Or keep them in `pysrc/model.toml`, which is ignored by git.
+- Use `pysrc/model.example.toml` as a safe template.
+- Never commit API keys, access tokens, local runtime state, logs, screenshots, cookies, or machine-specific paths.
+
+Before sharing a config file or release bundle, create a redacted copy:
+
+```bat
+venv\Scripts\python.exe scripts\scrub_config.py --input pysrc\model.toml --output .runtime\model.redacted.toml
+```
+
+Linux/macOS:
+
+```bash
+python scripts/scrub_config.py --input pysrc/model.toml --output .runtime/model.redacted.toml
+```
+
+The scrubber does not modify your real config. It writes a copy with common secret fields replaced by `<redacted>`.
 
 ### 3. Start On Windows
 
@@ -42,7 +71,7 @@ start.bat
 bash start.sh
 ```
 
-The launcher handles environment checks, dependency setup, backend and frontend startup, and port conflict detection. Open the URL printed by the launcher, usually:
+The launcher handles environment checks, dependency setup, backend and frontend startup, Docker database checks, and port conflict detection. Open the URL printed by the launcher, usually:
 
 ```text
 http://localhost:3000
@@ -92,38 +121,52 @@ Reduced mode is intended for interface checks, configuration checks, lightweight
 ## What It Does
 
 - **Agent trajectory analysis**: captures task traces, tool calls, outcomes, timing, confidence, and feedback signals for later evaluation.
-- **Hybrid memory**: combines cache, vector retrieval, relational persistence, and graph memory for long-running knowledge work.
+- **Hybrid memory**: combines cache, vector retrieval, relational persistence, graph memory, and ontology-backed memory records.
+- **Theoretical long-context workflow**: keeps short prompt context small while using searchable conversation history and long-term memory recall for older material.
 - **Tool-use evaluation**: records and scores tool behavior so agent workflows can be inspected rather than treated as a black box.
-- **Retrieval-enhanced knowledge work**: supports document ingestion, vector search, graph search, and citation-style answers.
+- **Retrieval-enhanced knowledge work**: supports document ingestion, vector search, graph search, citation-style answers, and evidence boundaries.
+- **Skill lifecycle governance**: records skill contracts, health, replay gates, and generated-skill promotion metadata.
 - **Companion-model learning loop**: turns interaction history into scoring, routing, regression checks, and future fine-tuning data.
-- **Skill system**: versioned skill packs for code, research, office, media, and agent-orchestration workflows.
-- **GUI automation layer**: screenshot, click, type, scroll, drag, and related computer-control actions.
+- **GUI/browser automation layer**: screenshot, click, type, scroll, drag, browser navigation, and controlled local preview actions.
 - **External trajectory ingestion**: imports compatible JSONL/text traces and custom framework data.
 - **Evaluation scaffolding**: ablation experiments for retrieval, memory, routing, and companion-model components.
 
-## Why Reviewers May Care
+## Skill Lifecycle Governance
 
-OpenMegatron is positioned as a research artifact rather than only an application demo. It exposes the intermediate data that is often hidden in agent systems:
+OpenMegatron skills are loaded from `pysrc/skills/`. In 1.2.0, generated or promoted skills also get a `skill_contract.json` file:
 
-- task trajectories and tool-call traces;
-- memory writes, retrieval paths, and graph relations;
-- reward/scoring signals for post-hoc evaluation;
-- ablation-friendly components for comparing memory, retrieval, routing, and companion-learning choices;
-- local-first execution that makes experiments easier to reproduce and inspect.
+```text
+pysrc/skills/generated/<skill_name>/
++-- SKILL.md
++-- skill_contract.json
++-- scripts/main.py
+```
 
-The platform can support studies of agent reliability, tool-use behavior, memory architecture, retrieval quality, human feedback signals, and lightweight companion-model training loops.
+The contract records:
 
-## Why Product Teams May Care
+- input and output schemas;
+- allowed paths, network use, write permission, and command permission;
+- risk level;
+- lifecycle thresholds such as minimum replay cases and pass rate;
+- ontology tags and promotion metadata.
 
-OpenMegatron also has practical commercial signals:
+Useful API endpoints:
 
-- **Local governance**: private credentials and runtime data can stay outside the tracked repository.
-- **Observable automation**: tool use, failures, retries, and outcomes can be logged and reviewed.
-- **Adaptation from usage**: task traces can become evaluation data and training data instead of disposable logs.
-- **Modular deployment path**: full mode supports database-backed experiments, while reduced mode supports demos and configuration checks.
-- **Model-agnostic routing**: endpoint and routing settings are separated from private credentials.
+```text
+GET  /skills/list
+GET  /skills/lifecycle
+POST /skills/replay_verify
+```
 
-This makes it useful for teams evaluating internal agent workflows before committing to a larger production architecture.
+Replay verification example:
+
+```bash
+curl -X POST http://127.0.0.1:8000/skills/replay_verify ^
+  -H "Content-Type: application/json" ^
+  -d "{\"skill_name\":\"browser_control\"}"
+```
+
+If your backend is running on an auto-selected port, use the port printed by `start.bat health`.
 
 ## Companion Model Scope
 
@@ -140,19 +183,23 @@ Its value is that OpenMegatron can learn from task history instead of relying on
 
 ```text
 openMegatron/
-├── start.bat              Windows one-click launcher
-├── start.ps1              launcher implementation
-├── start.sh               Linux/macOS launcher
-├── pysrc/                 Python backend
-│   ├── agent.py           core agent loop
-│   ├── skill.py           tool and skill registry
-│   ├── memory.py          long-term memory and RAG storage
-│   ├── reward_*.py        reward model and training
-│   ├── trajectory_*.py    trace collection and import
-│   └── skills/            skill packs
-├── src/                   React frontend
-├── tests/                 Python tests
-└── docker-compose.yml     Redis/PostgreSQL/Neo4j
++-- start.bat              Windows one-click launcher
++-- start.ps1              launcher implementation
++-- start.sh               Linux/macOS launcher
++-- package.json           frontend package metadata, version 1.2.0
++-- pysrc/                 Python backend
+|   +-- agent.py           core agent loop and FastAPI endpoints
+|   +-- skill.py           tool and skill registry
+|   +-- skill_lifecycle.py skill contracts, health, replay gates
+|   +-- memory.py          long-term memory and RAG storage
+|   +-- reward_*.py        reward model and training
+|   +-- trajectory_*.py    trace collection and import
+|   +-- skills/            skill packs
++-- scripts/
+|   +-- scrub_config.py    redacted TOML copy generator
++-- src/                   React frontend
++-- tests/                 Python tests
++-- docker-compose.yml     Redis/PostgreSQL/Neo4j
 ```
 
 ## Troubleshooting
@@ -171,6 +218,7 @@ Read logs:
 
 ```text
 .runtime/
+log/
 ```
 
 Restart:
@@ -183,6 +231,23 @@ start.bat
 ```bash
 bash start.sh stop
 bash start.sh
+```
+
+## Release Hygiene
+
+Before publishing or sharing a support bundle:
+
+1. Stop local services with `start.bat stop`.
+2. Generate a redacted config copy with `scripts/scrub_config.py`.
+3. Check that `pysrc/model.toml`, `.env*`, `.runtime/`, `.trajectory/`, `log/`, cookies, and local screenshots are not included.
+4. Run tests relevant to the change.
+
+Useful checks:
+
+```bat
+venv\Scripts\python.exe -m py_compile pysrc\agent.py pysrc\skill.py scripts\scrub_config.py
+venv\Scripts\python.exe -m pytest tests\test_skill_lifecycle.py tests\test_scrub_config.py -q
+npm run lint
 ```
 
 ## DOI
